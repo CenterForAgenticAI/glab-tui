@@ -2288,6 +2288,9 @@ impl Backend for GlabBackend {
             target: GiTodoTarget,
             target_type: String,
             state: String,
+            // GitLab todo objects carry `created_at`, not `updated_at`, at the
+            // top level. Accept either so a missing key never fails the parse.
+            #[serde(alias = "created_at", default)]
             updated_at: String,
         }
         #[derive(Deserialize)]
