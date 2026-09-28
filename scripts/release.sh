@@ -310,8 +310,8 @@ select_start_phase() {
     "$PHASE_GIFS"$'\t'"2 · Generate GIFs only   (re-run generate-demos.sh, push, rebuild PR if needed)"
     "$PHASE_REVIEW"$'\t'"3 · Review & merge       (squash-merge an existing PR and tag)"
     "$PHASE_WAIT_CI"$'\t'"4 · Wait for CI build    (poll release assets for an already-tagged version)"
-    "$PHASE_POST_RELEASE"$'\t'"5 · Post-release         (release notes, Homebrew formula, Scoop manifest — Homebrew/Scoop skipped for nightly)"
-    "$PHASE_PUBLISH"$'\t'"6 · Publish              (Docker image → GHCR + crate → crates.io — crates.io skipped for nightly)"
+    "$PHASE_POST_RELEASE"$'\t'"5 · Post-release         (generate & upload release notes)"
+    "$PHASE_PUBLISH"$'\t'"6 · Publish              (Homebrew formula, Scoop manifest, Docker image → GHCR, crate → crates.io)"
   )
 
   note "Where would you like to start?"
@@ -696,7 +696,41 @@ wait_for_release() {
 }
 
 # ---------------------------------------------------------------------------
-# Phase 5: post-release (notes, Homebrew, Scoop)
+# Phase 5: post-release (release notes)
+# ---------------------------------------------------------------------------
+post_release() {
+  ensure_version
+  select_ai_model
+
+  local prev_tag prompt
+  prev_tag="$(git describe --tags --abbrev=0 "${NEW_TAG}^" 2>/dev/null || git describe --tags --abbrev=0 2>/dev/null || true)"
+  [[ -n "$prev_tag" ]] || die "could not determine the previous tag before $NEW_TAG"
+
+  note "Generating RELEASE_NOTES.md via ${AI_TOOL}..."
+  prompt="Read CHANGELOG.md and extract the section for version $NEW_TAG.
+
+Also read the existing release notes for the previous tag $prev_tag (use \`gh release view $prev_tag --json body --jq .body\`) to match their formatting style.
+
+Write the file RELEASE_NOTES.md matching the same format:
+- Title \"## What's Changed\"
+- Sections: ### Added / ### Fixed / ### Changed / ### Dependencies
+- Entries start with bolded headline: \`- **Name** — Description with references (#123).\`
+- Attribute each entry to its contributor by appending \"(thanks @username)\" where the author can be determined from the PR/commit metadata (e.g. \`- **Name** — Description (#123) — thanks @username\`).
+- End with a \`**Contributors**\` section listing every contributor since $prev_tag as a markdown list of \`@username\` handles, ordered by number of contributions.
+- End with: \`**Full Changelog**: https://github.com/rcieri/glab-tui/compare/$prev_tag...$NEW_TAG\`
+
+Use the content from CHANGELOG.md for the current version as the source material."
+
+  run_ai "$prompt"
+  [[ -f RELEASE_NOTES.md && -s RELEASE_NOTES.md ]] || die "RELEASE_NOTES.md was not generated or is empty"
+  ok "RELEASE_NOTES.md generated"
+
+  note "Updating release $NEW_TAG body..."
+  spinner "Updating release $NEW_TAG body" gh release edit "$NEW_TAG" --repo "$REPO" --notes-file RELEASE_NOTES.md
+}
+
+# ---------------------------------------------------------------------------
+# Phase 6: publish (Homebrew, Scoop, Docker image, crate)
 # ---------------------------------------------------------------------------
 update_homebrew() {
   (
@@ -765,7 +799,7 @@ class GlabTui < Formula
   end
 
   test do
-    system "\#{bin}/glab-tui", "--help"
+    system "#{bin}/glab-tui", "--help"
   end
 end
 EOF
@@ -814,56 +848,17 @@ update_scoop() {
   )
 }
 
-post_release() {
+publish() {
   ensure_version
-  select_ai_model
-
-  local prev_tag prompt
-  prev_tag="$(git describe --tags --abbrev=0 "${NEW_TAG}^" 2>/dev/null || git describe --tags --abbrev=0 2>/dev/null || true)"
-  [[ -n "$prev_tag" ]] || die "could not determine the previous tag before $NEW_TAG"
-
-  note "Generating RELEASE_NOTES.md via ${AI_TOOL}..."
-  prompt="Read CHANGELOG.md and extract the section for version $NEW_TAG.
-
-Also read the existing release notes for the previous tag $prev_tag (use \`gh release view $prev_tag --json body --jq .body\`) to match their formatting style.
-
-Write the file RELEASE_NOTES.md matching the same format:
-- Title \"## What's Changed\"
-- Sections: ### Added / ### Fixed / ### Changed / ### Dependencies
-- Entries start with bolded headline: \`- **Name** — Description with references (#123).\`
-- Attribute each entry to its contributor by appending \"(thanks @username)\" where the author can be determined from the PR/commit metadata (e.g. \`- **Name** — Description (#123) — thanks @username\`).
-- End with a \`**Contributors**\` section listing every contributor since $prev_tag as a markdown list of \`@username\` handles, ordered by number of contributions.
-- End with: \`**Full Changelog**: https://github.com/rcieri/glab-tui/compare/$prev_tag...$NEW_TAG\`
-
-Use the content from CHANGELOG.md for the current version as the source material."
-
-  run_ai "$prompt"
-  [[ -f RELEASE_NOTES.md && -s RELEASE_NOTES.md ]] || die "RELEASE_NOTES.md was not generated or is empty"
-  ok "RELEASE_NOTES.md generated"
-
-  note "Updating release $NEW_TAG body..."
-  spinner "Updating release $NEW_TAG body" gh release edit "$NEW_TAG" --repo "$REPO" --notes-file RELEASE_NOTES.md
 
   if is_nightly; then
-    note "Skipping Homebrew/Scoop manifest updates for nightly $NEW_TAG"
+    note "Skipping Homebrew/Scoop manifest updates, Docker push, and crates.io publish for nightly $NEW_TAG"
+    note "(pre-release versions are rejected by crates.io, and nightly Docker images / package managers are intentionally not pushed)"
     return 0
   fi
 
   update_homebrew
   update_scoop
-}
-
-# ---------------------------------------------------------------------------
-# Phase 6: publish (Docker image + crate)
-# ---------------------------------------------------------------------------
-publish() {
-  ensure_version
-
-  if is_nightly; then
-    note "Skipping Docker push and crates.io publish for nightly $NEW_TAG"
-    note "(pre-release versions are rejected by crates.io, and nightly Docker images are intentionally not pushed)"
-    return 0
-  fi
 
   local package_version tag_version user
   package_version="$(cargo metadata --format-version 1 --no-deps 2>/dev/null | jq -r '.packages[0].version')"
@@ -930,13 +925,13 @@ main() {
     wait_for_release
   fi
 
-  # ── Phase 5: Post-release (notes, Homebrew, Scoop) ───────────────────────
+  # ── Phase 5: Post-release (release notes) ─────────────────────────────────
   if [[ "$START_PHASE" -le "$PHASE_POST_RELEASE" ]]; then
     phase 6 "Post-release"
     post_release
   fi
 
-  # ── Phase 6: Publish (Docker + crate) ────────────────────────────────────
+  # ── Phase 6: Publish (Homebrew, Scoop, Docker, crate) ─────────────────────
   if [[ "$START_PHASE" -le "$PHASE_PUBLISH" ]]; then
     phase 7 "Publish"
     publish
