@@ -519,6 +519,7 @@ pub fn build_job_document(
 pub fn build_milestone_document(
     milestone: &crate::domain::milestones::Milestone,
     issues: Option<&[crate::domain::issues::Issue]>,
+    progress: Option<(usize, usize)>,
     _is_github: bool,
 ) -> crate::app::EntityDocument {
     let mut fields = vec![
@@ -550,9 +551,15 @@ pub fn build_milestone_document(
             milestone.project_path.clone(),
         ));
     }
-    if let Some(iss) = issues {
-        let total = iss.len();
-        let closed = iss.iter().filter(|i| i.state == "closed").count();
+    let progress_tuple = issues
+        .map(|iss| {
+            let total = iss.len();
+            let closed = iss.iter().filter(|i| i.state == "closed").count();
+            (closed, total)
+        })
+        .or(progress);
+
+    if let Some((closed, total)) = progress_tuple {
         let pct = if total > 0 {
             (closed as f32 / total as f32) * 100.0
         } else {
@@ -579,12 +586,60 @@ pub fn build_milestone_document(
             "[░░░░░░░░░░] 0% (Loading...)".to_string(),
         ));
     }
+
+    if let Some(iss) = issues {
+        let issues_field = if iss.is_empty() {
+            "None".to_string()
+        } else {
+            iss.iter()
+                .map(|i| format!("#{}", i.iid))
+                .collect::<Vec<_>>()
+                .join(", ")
+        };
+        fields.push(crate::app::Field::read_only(
+            "Issues",
+            crate::utils::format::truncate(&issues_field, 60),
+        ));
+    } else if let Some((closed, total)) = progress {
+        fields.push(crate::app::Field::read_only(
+            "Issues",
+            format!("{} issues ({} closed)", total, closed),
+        ));
+    } else {
+        fields.push(crate::app::Field::read_only(
+            "Issues",
+            "(Loading...)".to_string(),
+        ));
+    }
+
+    let mut doc_content = milestone.description.clone().unwrap_or_default();
+    if let Some(iss) = issues {
+        if !iss.is_empty() {
+            if !doc_content.is_empty() {
+                doc_content.push_str("\n\n---\n\n");
+            }
+            doc_content.push_str("### Related Issues\n\n");
+            for i in iss {
+                let state_str = if i.state.eq_ignore_ascii_case("opened")
+                    || i.state.eq_ignore_ascii_case("open")
+                {
+                    "OPEN"
+                } else if i.state.eq_ignore_ascii_case("closed")
+                    || i.state.eq_ignore_ascii_case("close")
+                {
+                    "CLOSED"
+                } else {
+                    i.state.as_str()
+                };
+                doc_content.push_str(&format!("- #{} `[{}]` {}\n", i.iid, state_str, i.title));
+            }
+        }
+    }
+
     crate::app::EntityDocument {
         title: format!("Milestone %{}", milestone.iid),
         fields,
-        content: crate::app::InspectorContent::Markdown(
-            milestone.description.clone().unwrap_or_default(),
-        ),
+        content: crate::app::InspectorContent::Markdown(doc_content),
     }
 }
 
@@ -1459,8 +1514,8 @@ pub fn rebuild_edit_menu(app: &mut App, entity_type: &str, entity_iid: u64) {
                 .clone()
                 .or_else(|| app.milestone_issues_cache.get(&milestone.iid).cloned());
             let issues_ref: Option<&[crate::domain::issues::Issue]> = issues.as_deref();
-
-            let mut doc = build_milestone_document(&milestone, issues_ref, is_github);
+            let progress = app.milestone_progress_cache.get(&milestone.iid).copied();
+            let mut doc = build_milestone_document(&milestone, issues_ref, progress, is_github);
             doc.fields.push(crate::app::Field::text(
                 "Description",
                 milestone.description.clone().unwrap_or_default(),
@@ -2044,5 +2099,102 @@ mod tests {
         issue.project_path.clear();
         let doc_no_proj = build_issue_document(&issue, false, false);
         assert!(!doc_no_proj.fields.iter().any(|f| f.label == "Project"));
+    }
+
+    #[test]
+    fn test_build_milestone_document_shows_progress_from_progress_cache() {
+        let milestone = crate::domain::milestones::Milestone {
+            id: 1,
+            iid: 5,
+            title: "v1.0".to_string(),
+            description: Some("Release 1.0".to_string()),
+            state: "active".to_string(),
+            start_date: None,
+            due_date: None,
+            created_at: "2026-01-01T00:00:00Z".to_string(),
+            project_path: "owner/repo".to_string(),
+        };
+
+        // Case 1: with progress tuple (3 closed, 5 total)
+        let doc = build_milestone_document(&milestone, None, Some((3, 5)), false);
+        let progress_field = doc.fields.iter().find(|f| f.label == "Progress").unwrap();
+        assert_eq!(progress_field.value, "[██████░░░░] 60% (3/5 closed)");
+        let issues_field = doc.fields.iter().find(|f| f.label == "Issues").unwrap();
+        assert_eq!(issues_field.value, "5 issues (3 closed)");
+
+        // Case 2: with issues list
+        let issue1 = crate::domain::issues::Issue {
+            iid: 1,
+            title: "Issue 1".into(),
+            state: "closed".into(),
+            description: None,
+            author: crate::domain::issues::Author {
+                username: "alice".into(),
+            },
+            assignees: vec![],
+            labels: vec![],
+            milestone: None,
+            due_date: None,
+            created_at: None,
+            closed_at: None,
+            updated_at: String::new(),
+            project_path: "owner/repo".into(),
+            web_url: String::new(),
+            related_mrs: None,
+        };
+        let issue2 = crate::domain::issues::Issue {
+            iid: 2,
+            title: "Issue 2".into(),
+            state: "opened".into(),
+            description: None,
+            author: crate::domain::issues::Author {
+                username: "bob".into(),
+            },
+            assignees: vec![],
+            labels: vec![],
+            milestone: None,
+            due_date: None,
+            created_at: None,
+            closed_at: None,
+            updated_at: String::new(),
+            project_path: "owner/repo".into(),
+            web_url: String::new(),
+            related_mrs: None,
+        };
+        let doc_issues = build_milestone_document(&milestone, Some(&[issue1, issue2]), None, false);
+        let progress_issues_field = doc_issues
+            .fields
+            .iter()
+            .find(|f| f.label == "Progress")
+            .unwrap();
+        assert_eq!(progress_issues_field.value, "[█████░░░░░] 50% (1/2 closed)");
+        let issues_field = doc_issues
+            .fields
+            .iter()
+            .find(|f| f.label == "Issues")
+            .unwrap();
+        assert_eq!(issues_field.value, "#1, #2");
+        if let crate::app::InspectorContent::Markdown(content) = &doc_issues.content {
+            assert!(content.contains("### Related Issues"));
+            assert!(content.contains("- #1 `[CLOSED]` Issue 1"));
+            assert!(content.contains("- #2 `[OPEN]` Issue 2"));
+        } else {
+            panic!("Expected markdown content");
+        }
+
+        // Case 3: without progress and without issues
+        let doc_none = build_milestone_document(&milestone, None, None, false);
+        let progress_none_field = doc_none
+            .fields
+            .iter()
+            .find(|f| f.label == "Progress")
+            .unwrap();
+        assert_eq!(progress_none_field.value, "[░░░░░░░░░░] 0% (Loading...)");
+        let issues_none_field = doc_none
+            .fields
+            .iter()
+            .find(|f| f.label == "Issues")
+            .unwrap();
+        assert_eq!(issues_none_field.value, "(Loading...)");
     }
 }
