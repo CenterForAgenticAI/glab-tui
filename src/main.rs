@@ -3522,6 +3522,7 @@ async fn main() -> Result<()> {
                                                     app.apply_config();
                                                     app.load_custom_commands();
                                                     crate::config::reload_theme();
+                                                    crate::config::reload_icons();
 
                                                     if let Ok(context) =
                                                         domain::client::get_project_context().await
@@ -4195,7 +4196,7 @@ async fn main() -> Result<()> {
 
                                     if field_type == "stack_entries" {
                                         // Each line is formatted
-                                        // "<pos>. #<iid>: <title> (STATE) ... [draft] ◀ (current)".
+                                        // "<pos>. #<iid>: <title> (STATE) ... [draft] <nav_prev> (current)".
                                         // Pick the `#iid` token via a `split('#')`
                                         // pass that handles any extra `#` in
                                         // titles without tripping the parse.

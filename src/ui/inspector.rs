@@ -542,15 +542,15 @@ pub(crate) fn build_field_list_items(
                 FieldType::ReadOnly if interactive => icons.readonly.as_str(),
                 FieldType::MultiSelect => {
                     if label == "Labels" {
-                        "\u{f02b}"
+                        icons.tag.as_str()
                     } else if label == "Assignees" || label == "Reviewers" || label == "Author" {
-                        "\u{f007}"
+                        icons.user.as_str()
                     } else {
                         icons.check_on.as_str()
                     }
                 }
                 FieldType::Toggle => icons.radio_on.as_str(),
-                FieldType::Date => "\u{f073}",
+                FieldType::Date => icons.date.as_str(),
                 FieldType::Ref => icons.label_branch.as_str(),
                 FieldType::Text | FieldType::ReadOnly => match label.as_str() {
                     "Title" | "Description" | "Name" => icons.label_details.as_str(),
@@ -569,11 +569,11 @@ pub(crate) fn build_field_list_items(
                         "paused" => icons.runner_paused.as_str(),
                         _ => icons.label_details.as_str(),
                     },
-                    "Author" | "Assignees" | "Reviewers" | "Deployer" => "\u{f007}",
+                    "Author" | "Assignees" | "Reviewers" | "Deployer" => icons.user.as_str(),
                     "Default" => icons.radio_on.as_str(),
-                    "Protected" => "\u{f023}",
+                    "Protected" => icons.lock.as_str(),
                     "Can Push" => icons.check_on.as_str(),
-                    "URL" => "\u{f0c1}",
+                    "URL" => icons.link.as_str(),
                     "Milestone" => icons.label_milestone.as_str(),
                     "Branch" | "Source Branch" | "Target Branch" | "Ref" | "Deploy Ref" => {
                         icons.label_branch.as_str()
@@ -585,13 +585,13 @@ pub(crate) fn build_field_list_items(
                     "Threads" => icons.thread_unresolved.as_str(),
                     "Merge Requests" | "Pull Requests" => icons.tab_pr.as_str(),
                     "Created" | "Updated" | "Date" | "Due Date" | "Start Date" | "Released"
-                    | "Deployed" => "\u{f073}",
-                    "Duration" | "Avg Wait" => "\u{f017}",
+                    | "Deployed" => icons.date.as_str(),
+                    "Duration" | "Avg Wait" => icons.clock.as_str(),
                     "ID" | "SHA" | "Commit" | "Deploy SHA" | "Deploy ID" | "Runner" | "Tag" => {
-                        "\u{f029}"
+                        icons.identifier.as_str()
                     }
                     "Metrics" | "Utilization" | "Queue Depth" | "Active Jobs" | "Progress" => {
-                        "\u{f080}"
+                        icons.chart.as_str()
                     }
                     _ => icons.label_details.as_str(),
                 },
@@ -664,6 +664,7 @@ pub(crate) fn build_field_list_items(
                                     .add_modifier(Modifier::ITALIC),
                             ));
                         } else {
+                            val_spans.push(Span::styled(" ", Style::default().bg(item_bg)));
                             let parts: Vec<&str> = truncated.split(',').collect();
                             for (idx, part) in parts.iter().enumerate() {
                                 if idx > 0 {
@@ -840,6 +841,7 @@ pub(crate) fn build_field_list_items(
                                 || val.contains("[MERGED]"))
                         {
                             // Render each !iid [STATE] title as a colored span.
+                            val_spans.push(Span::styled(" ", Style::default().bg(item_bg)));
                             for (idx, item) in val.split(", ").enumerate() {
                                 if idx > 0 {
                                     val_spans.push(Span::styled(
@@ -924,7 +926,7 @@ pub(crate) fn build_field_list_items(
                                         ));
                                     } else {
                                         val_spans.push(Span::styled(
-                                            format!(" {}", item),
+                                            item.to_string(),
                                             Style::default().fg(theme.text_normal).bg(item_bg),
                                         ));
                                     }
@@ -1001,7 +1003,7 @@ fn build_wrapped_text_lines(
 
     if chunks.is_empty() {
         let mut spans = vec![Span::styled(
-            format!(" {} {:<label_width$} ", icon, label),
+            format!(" {} {:<label_width$}  ", icon, label),
             label_style,
         )];
         if is_editing {
@@ -1035,14 +1037,14 @@ fn build_wrapped_text_lines(
         if idx == 0 {
             line_spans.push(Span::styled(format!(" {} ", icon), icon_style));
             line_spans.push(Span::styled(
-                format!("{:<label_width$} ", label),
+                format!("{:<label_width$}  ", label),
                 label_style,
             ));
         } else {
             // Continuation line indentation that aligns exactly under the
             // value column of the first line.
             line_spans.push(Span::styled(
-                format!(" {:<width$}   ", "", width = label_width + 3),
+                format!("{:<width$}", "", width = label_width + 5),
                 label_style,
             ));
         }
