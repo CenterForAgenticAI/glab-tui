@@ -21,7 +21,7 @@ Instead of implementing full REST/GraphQL API clients, **`glab-tui` shells out t
 * **Package:** `glab-tui-crate` (binary: `glab-tui`; current version `v0.9.2`)
 
 ### Dual-Engine Architecture
-The application detects whether the current repository is hosted on GitHub or GitLab and instantiates either a `GlabBackend` or `GhBackend`. Detection is centralized in `git_helpers::detect_backend(remote_url, override_kind)` ([src/git_helpers.rs](src/git_helpers.rs)): `github.com` remotes (with or without `www.` prefix) resolve to GitHub; other hosts are probed with `gh auth status --active --hostname <host>` and `glab auth status --hostname <host>`, defaulting to GitLab when neither/both respond. A repo-local `backend = "github" | "gitlab"` config override always takes precedence — set it for SSH aliases or hosts serving both platforms. Always route backend detection through `detect_backend`; do not reimplement inline `github.com` string matching. Both backends implement the `Backend` trait ([src/backend/mod.rs](src/backend/mod.rs)). The domain layer ([src/domain/](src/domain/)) calls backend methods through `GitlabClient` ([src/domain/client.rs](src/domain/client.rs)). Runtime backend identification is available via the `BackendKind` enum (`BackendKind::GitLab` / `BackendKind::GitHub`) which also provides host-aware terminology through `BackendKind::term()`.
+The application detects whether the current repository is hosted on GitHub or GitLab and instantiates either a `GlabBackend` or `GhBackend`. Detection is centralized in `git_helpers::detect_backend(remote_url, override_kind)` ([src/git_helpers.rs](src/git_helpers.rs)): `github.com` remotes (with or without `www.` prefix) resolve to GitHub; other hosts are probed with `gh auth status --active --hostname <host>` and `glab auth status --hostname <host>`, defaulting to GitLab when neither/both respond. Without an `origin` remote (e.g. `-r owner/repo` outside a checkout), `git_helpers::detect_backend_without_remote` applies the same rule to `gh auth status --active` / `glab auth status` with no hostname. A repo-local `backend = "github" | "gitlab"` config override always takes precedence — set it for SSH aliases or hosts serving both platforms. Always route backend detection through `detect_backend`; do not reimplement inline `github.com` string matching. Both backends implement the `Backend` trait ([src/backend/mod.rs](src/backend/mod.rs)). The domain layer ([src/domain/](src/domain/)) calls backend methods through `GitlabClient` ([src/domain/client.rs](src/domain/client.rs)). Runtime backend identification is available via the `BackendKind` enum (`BackendKind::GitLab` / `BackendKind::GitHub`) which also provides host-aware terminology through `BackendKind::term()`.
 
 The `namespace/project` context passed as `-R <repo>` to every `glab`/`gh` call is extracted from the remote URL by `git_helpers::parse_project_path` ([src/git_helpers.rs](src/git_helpers.rs)), which keeps every path segment after the host so nested GitLab subgroup namespaces (`group/subgroup/project`) resolve correctly. Always use this helper — do not reimplement remote-URL parsing inline.
 
@@ -72,7 +72,8 @@ Group/org-level browsing is supported via the `Scope` enum ([src/scope.rs](src/s
     * [markdown.rs](src/utils/markdown.rs): CommonMark + GFM Markdown rendering via `pulldown-cmark`.
     * [ui.rs](src/utils/ui.rs): Wrappers for `ratatui` stateful lists and tables.
     * [update.rs](src/utils/update.rs): GitHub releases self-updater with multi-target Linux asset selection.
-* [src/cli.rs](src/cli.rs): CLI subcommands (`doctor`, `clean-cache`), flags (`--config` sets `config::use_config_file`, which `Config::config_path()` honours before `GLAB_TUI_CONFIG`/XDG) and ANSI-styled diagnostic output.
+* [src/cli.rs](src/cli.rs): CLI subcommands (`doctor`, `clean-cache`, `cache`, `open`, `repos`, `review`), flags (`--config` sets `config::use_config_file`, which `Config::config_path()` honours before `GLAB_TUI_CONFIG`/XDG; `-r/--repo` and `-d/--dir` are global, and `--dir` is applied before any subcommand runs) and ANSI-styled diagnostic output.
+    * [cli/review.rs](src/cli/review.rs): `glab-tui review threads|comment|submit|reply|resolve` — non-interactive review for scripts and agents. JSON on stdout, errors on stderr with a non-zero exit. `--input` is a JSON array of `{ file, line, end_line?, side?: "old"|"new", body }`; anchors are checked against the diff (`DiffView::new` + `DiffView::contains_anchor`, same classification as the review threads overlay) before anything is posted. E2E coverage in `tests/e2e/review_cli.rs`; the `gh`/`glab` mocks append `--input -` request bodies to `<TEST_LOG_PATH>.stdin` and fail any call matching `TEST_GH_FAIL_MATCH` / `TEST_GLAB_FAIL_MATCH`.
 * [src/templates.rs](src/templates.rs): Default issue/MR description templates.
 * [src/editor.rs](src/editor.rs): External editor integration (`$EDITOR`/`$VISUAL`) and `suspend_and_run` / `suspend_while`, the shared terminal handoff for any foreground child process (or several in one handoff).
 * [src/entity_editor.rs](src/entity_editor.rs): Edit-menu field change logic and creation form helpers.
@@ -142,7 +143,8 @@ Group/org-level browsing is supported via the `Scope` enum ([src/scope.rs](src/s
 * **Diff view** supports inline comments, code suggestions, draft reviews, dynamic gutter sizing, and tab expansion:
   - `DiscussionNote` / `NotePosition` structs in [src/domain/mr.rs](src/domain/mr.rs).
   - `list_mr_notes()` fetches notes for an MR via the API.
-  - Draft comments are stored in `app.draft_comments: Vec<DraftComment>` and submitted atomically.
+  - Draft comments are stored in `app.draft_comments: Vec<DraftComment>` (`DraftComment` / `ReviewEvent` live in [src/domain/review.rs](src/domain/review.rs)) and submitted atomically.
+  - Every review mutation goes through `Backend::submit_review` / `reply_to_thread` / `set_thread_resolved`; the diff view and the `glab-tui review` subcommand share them. A comment posted outside review mode is a one-comment `submit_review`. Do not shell out to `gh api` / `glab api` for reviews from the event loop.
   - Current (already-pushed) comments live in `app.current_comments: Vec<DiscussionNote>`.
   - Diffs load through `fetch::fetch_diff_view`, which builds the `DiffView` on a blocking thread (parsing and highlighting a large diff takes seconds) and sends `DiffFetched { diff_view, comments }`; the "Fetching Diff" overlay stays up until it arrives. `D` is ignored while `app.diff_loading` is set, so a second press cannot start a second fetch.
   - The parser in `DiffView::new` follows each hunk's `@@` line counts: while a hunk still owes lines, every line is content, so a removed `-- comment` (`--- comment`) or added `++ x` is never read as a file header. `\ No newline at end of file` is a `Meta` row with no line numbers. Paths are read with `parse_diff_git_paths` / `parse_patch_header_path`, which keep spaces and decode git's C-style quoting.
@@ -293,6 +295,10 @@ Every interaction with GitLab/GitHub goes through `glab` or `gh` CLI. This secti
 | Mark todo done | `glab todo done <id>` |
 | Revoke MR approval | `glab mr revoke <iid> -R <repo>` |
 | Rebase MR | `glab mr rebase <iid> -R <repo>` |
+| MR diff refs (review anchors) | `glab mr view <iid> --output json -R <repo>` (`diff_refs`) |
+| Review summary note | `glab mr note create <iid> -R <repo> -m <body>` |
+| Reply to review thread | `glab mr note create <iid> -R <repo> --reply <discussion-id> -m <body>` |
+| Resolve/reopen review thread | `glab mr note resolve\|reopen <discussion-id> <iid> -R <repo>` |
 
 #### Data Fetching — Raw API (no native subcommand exists)
 
@@ -316,6 +322,7 @@ Every interaction with GitLab/GitHub goes through `glab` or `gh` CLI. This secti
 | List group labels | `GET /groups/{}/labels?per_page=<N>` | `glab label list -g` has no pagination control |
 | List environments | `GET /projects/{}/environments?per_page=<N>` | No native command |
 | List deployments | `GET /projects/{}/deployments?per_page=<N>` | No native command |
+| Review draft notes | `POST /projects/{}/merge_requests/{}/draft_notes` per comment, then one `POST .../draft_notes/bulk_publish` | `glab mr note create` posts one note at a time and cannot batch them into a review |
 
 ### GhBackend (`src/backend/gh.rs`)
 
@@ -347,6 +354,7 @@ Every interaction with GitLab/GitHub goes through `glab` or `gh` CLI. This secti
 | Delete release | `gh release delete <tag> -R <repo> -y` |
 | Update milestone state | `gh api -X PATCH repos/{}/milestones/{} -f state=...` |
 | Rebase PR | `gh pr update-branch <iid> -R <repo> --rebase` |
+| Resolve review thread | not supported — `Backend::set_thread_resolved` errors on GitHub |
 
 #### Data Fetching — Raw API (no native subcommand exists)
 
@@ -370,6 +378,8 @@ Every interaction with GitLab/GitHub goes through `glab` or `gh` CLI. This secti
 | List environments | `GET /repos/{}/environments?per_page=<N>` | No native command |
 | List deployments | `GET /repos/{}/deployments?per_page=<N>` | No native command |
 | List members | `GET /repos/{}/assignees?per_page=100` | No native command |
+| Submit review | `POST /repos/{}/pulls/{}/reviews` (`body`, `event`, `comments[]` with `side`/`start_line`) | `gh pr review` has no inline comments; one call carries the whole review |
+| Reply to review thread | `POST /repos/{}/pulls/{}/comments` with `in_reply_to` | `gh pr comment` cannot reply to a review comment |
 
 ### Direct CLI Commands (`src/main.rs` — `run_cli()`)
 
@@ -394,8 +404,6 @@ These are user-triggered mutations that shell out directly to the CLI without go
 | Delete branch | `glab api DELETE ...repository/branches/{}` / `gh api DELETE ...git/refs/heads/{}` |
 | Run pipeline | `gh workflow run` / `glab ci run --mr` |
 | Open in browser | `gh issue\|pr\|run view --web` / `glab issue\|mr\|ci view -w` |
-| Reply to comment | `gh api POST repos/{}/pulls/{}/comments` / `glab api POST projects/{}/merge_requests/{}/discussions/{}/notes` |
-| Submit review | `gh api POST repos/{}/pulls/{}/reviews` / `glab api POST projects/{}/merge_requests/{}/...` |
 
 > `glab ci run` notes: variables/inputs are passed via the plural `--variables k:v` / `--input k:v` flags (not `--variable`), and `--mr` is only passed when no variables or `workflow_dispatch` inputs are set.
 

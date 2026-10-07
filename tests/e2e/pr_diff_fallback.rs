@@ -198,14 +198,14 @@ fn move_cursor_to(session: &mut TestSession, code: &str) {
     );
 }
 
-/// The review payload the mock `gh` logged when the review was submitted.
+/// The review payload `gh api` received on stdin when the review was submitted.
 fn wait_for_review_payload(session: &mut TestSession) -> String {
-    const PREFIX: &str = "review payload: ";
+    let bodies = format!("{}.stdin", session.sandbox.log_path.display());
     for _ in 0..200 {
-        if let Some(line) = session
-            .get_cli_calls()
+        if let Some(line) = std::fs::read_to_string(&bodies)
+            .unwrap_or_default()
             .lines()
-            .find_map(|line| line.strip_prefix(PREFIX))
+            .find(|line| line.contains(r#""event":"#))
         {
             return line.to_string();
         }

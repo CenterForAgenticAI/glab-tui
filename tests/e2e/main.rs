@@ -10,6 +10,7 @@ mod keybindings;
 mod layout;
 mod pagination;
 mod pr_diff_fallback;
+mod review_cli;
 mod review_threads;
 mod scenarios;
 mod tabs;

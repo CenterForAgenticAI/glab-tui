@@ -3,6 +3,7 @@
 use crate::backend::BackendKind;
 use crate::config::{Config, KeybindingConfig, THEME, Theme};
 use crate::domain::mr::{DiscussionNote, NotePosition};
+use crate::domain::review::DraftComment;
 use crate::domain::review_threads::{ReviewThread, group_threads};
 use crate::domain::workflow_inputs::WorkflowInput;
 use crate::utils::format::{expand_tabs, strip_ansi_escapes};
@@ -2458,7 +2459,7 @@ impl DiffView {
             self.lines.get(self.cursor_idx).cloned()
         };
 
-        let line = sline_opt?;
+        let line = sline_opt.filter(|l| l.new_line_num.is_some() || l.old_line_num.is_some())?;
         if line.line_type == DiffLineType::Deletion {
             Some(CommentRange {
                 file_path: line.file_path.clone(),
@@ -2759,16 +2760,6 @@ pub struct CommentRange {
     pub end_line_num: Option<u32>,
     pub end_old_line_num: Option<u32>,
     pub lines: Vec<DiffLine>,
-}
-
-#[derive(Clone, Debug)]
-pub struct DraftComment {
-    pub file_path: String,
-    pub line_num: Option<u32>,
-    pub old_line_num: Option<u32>,
-    pub end_line_num: Option<u32>,
-    pub end_old_line_num: Option<u32>,
-    pub body: String,
 }
 
 impl DraftComment {
@@ -8788,6 +8779,19 @@ diff --git a/foo.txt b/foo.txt
             }),
             line_type: DiffLineType::Normal,
         }
+    }
+
+    #[test]
+    fn comment_range_skips_rows_without_a_line_number() {
+        let mut view = DiffView::new(
+            1,
+            "g/p".to_string(),
+            "diff --git a/a.rs b/a.rs\n--- a/a.rs\n+++ b/a.rs\n@@ -1 +1 @@\n-x\n+y\n".to_string(),
+        );
+        view.cursor_idx = 0;
+        assert!(view.get_comment_range().is_none(), "file header row");
+        view.cursor_idx = view.lines.iter().position(|l| l.content == "+y").unwrap();
+        assert_eq!(view.get_comment_range().unwrap().line_num, Some(1));
     }
 
     #[test]

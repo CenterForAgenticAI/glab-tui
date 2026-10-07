@@ -1,5 +1,6 @@
 use crate::backend::{Backend, BackendKind, IssueUpdate, MrUpdate};
 use crate::config::Config;
+use crate::domain::review::{DraftComment, ReviewEvent};
 use crate::scope::Scope;
 use anyhow::{Context, Result};
 
@@ -28,7 +29,9 @@ impl GitlabClient {
                     .await
                     .is_github()
             }
-            _ => config.backend.is_some_and(BackendKind::is_github),
+            _ => crate::git_helpers::detect_backend_without_remote(config.backend)
+                .await
+                .is_github(),
         };
         let backend = crate::backend::create_backend(is_github);
         Ok(Self {
@@ -270,17 +273,46 @@ impl GitlabClient {
             .await
     }
 
-    pub async fn add_mr_comment(
+    pub async fn submit_review(
         &self,
         project: &str,
         iid: u64,
+        event: ReviewEvent,
         body: &str,
-        file_path: Option<&str>,
-        line: Option<u64>,
-        old_line: Option<u64>,
+        comments: &[DraftComment],
+    ) -> Result<()> {
+        if let Some(comment) = comments
+            .iter()
+            .find(|c| c.line_num.is_none() && c.old_line_num.is_none())
+        {
+            anyhow::bail!("comment on {} has no diff line", comment.file_path);
+        }
+        self.backend
+            .submit_review(project, iid, event, body, comments)
+            .await
+    }
+
+    pub async fn reply_to_thread(
+        &self,
+        project: &str,
+        iid: u64,
+        thread_id: &str,
+        body: &str,
     ) -> Result<()> {
         self.backend
-            .add_mr_comment(project, iid, body, file_path, line, old_line)
+            .reply_to_thread(project, iid, thread_id, body)
+            .await
+    }
+
+    pub async fn set_thread_resolved(
+        &self,
+        project: &str,
+        iid: u64,
+        thread_id: &str,
+        resolved: bool,
+    ) -> Result<()> {
+        self.backend
+            .set_thread_resolved(project, iid, thread_id, resolved)
             .await
     }
 
