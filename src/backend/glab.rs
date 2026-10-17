@@ -1,10 +1,12 @@
 use super::Backend;
+use super::bounded_output::{CapturedStdout, output_bounded};
 use crate::domain::branches::Branch;
 use crate::domain::deployments::{Deployment, Environment};
 use crate::domain::issues::{Issue, RelatedMrRef};
+use crate::domain::job_trace::{JOB_TRACE_MAX_BYTES, JobTrace, TraceCursor, TraceUpdate};
 use crate::domain::labels::Label;
 use crate::domain::milestones::Milestone;
-use crate::domain::mr::{DiscussionNote, MergeRequest};
+use crate::domain::mr::{DiscussionNote, MR_DIFF_MAX_BYTES, MergeRequest, ensure_complete_diff};
 use crate::domain::notifications::Notification;
 use crate::domain::pipelines::{Job, Pipeline};
 use crate::domain::releases::Release;
@@ -15,10 +17,14 @@ use crate::scope::Scope;
 use anyhow::{Context, Result};
 use async_trait::async_trait;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
+use std::sync::{LazyLock, Mutex};
 use tokio::process::Command;
 use tokio::sync::mpsc::UnboundedSender;
 use tokio::task::JoinSet;
+
+/// GitLab rejects a job log `byte_limit` above 500 KiB.
+const GITLAB_TRACE_RANGE_MAX_BYTES: usize = 500 * 1024;
 
 fn strip_ats(s: &str) -> String {
     if s.is_empty() {
@@ -272,11 +278,22 @@ async fn run_glab_command(
     args: Vec<String>,
     desc: String,
 ) -> Result<String> {
+    let stdout = run_glab_bounded(tx, args, desc, None).await?;
+    Ok(String::from_utf8(stdout.bytes)?)
+}
+
+/// `run_glab_command` keeping at most `max_stdout_bytes` of its output.
+async fn run_glab_bounded(
+    tx: Option<UnboundedSender<Event>>,
+    args: Vec<String>,
+    desc: String,
+    max_stdout_bytes: Option<usize>,
+) -> Result<CapturedStdout> {
     super::rate_limit::execute_with_retry(|| {
         let tx = tx.clone();
         let args = args.clone();
         let desc = desc.clone();
-        async move { run_glab_command_inner(tx, args, desc).await }
+        async move { run_glab_command_inner(tx, args, desc, max_stdout_bytes).await }
     })
     .await
 }
@@ -285,30 +302,28 @@ async fn run_glab_command_inner(
     tx: Option<UnboundedSender<Event>>,
     args: Vec<String>,
     desc: String,
-) -> Result<String> {
+    max_stdout_bytes: Option<usize>,
+) -> Result<CapturedStdout> {
     let label = desc.to_uppercase();
     let cmd_str = format!("glab {}", args.join(" "));
 
-    let output = Command::new("glab")
-        .args(&args)
-        .output()
+    let output = output_bounded(Command::new("glab").args(&args), max_stdout_bytes)
         .await
         .with_context(|| format!("Failed to execute: glab {}", args.join(" ")))?;
 
     let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-    if output.status.success() {
-        let s = String::from_utf8(output.stdout)?;
-        if let Some(ref tx) = tx {
+    if output.succeeded() {
+        if let Some(tx) = &tx {
             let _ = tx.send(Event::TerminalCommandLogged {
                 timestamp,
                 command: format!("{label}: {cmd_str}"),
                 status: "Success".to_string(),
             });
         }
-        Ok(s)
+        Ok(output.stdout)
     } else {
         let err_msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        if let Some(ref tx) = tx {
+        if let Some(tx) = &tx {
             let _ = tx.send(Event::TerminalCommandLogged {
                 timestamp,
                 command: format!("{label}: {cmd_str}"),
@@ -421,6 +436,63 @@ pub struct GlabBackend {
     tx: Option<UnboundedSender<Event>>,
 }
 
+/// Projects whose GitLab answered a ranged job log read with the whole log:
+/// it predates `byte_offset`/`byte_limit` and ignores them. Process-wide
+/// because every `GitlabClient` clone builds a fresh backend.
+static PROJECTS_IGNORING_TRACE_RANGES: LazyLock<Mutex<HashSet<String>>> =
+    LazyLock::new(Mutex::default);
+
+fn ignores_trace_ranges(project: &str) -> bool {
+    PROJECTS_IGNORING_TRACE_RANGES
+        .lock()
+        .is_ok_and(|projects| projects.contains(project))
+}
+
+fn remember_ignored_trace_ranges(project: &str) {
+    if let Ok(mut projects) = PROJECTS_IGNORING_TRACE_RANGES.lock() {
+        projects.insert(project.to_string());
+    }
+}
+
+/// How one reply to a ranged job log read relates to the part already read.
+#[derive(Debug, PartialEq)]
+enum RangedReply<'a> {
+    /// The requested range, filling `byte_limit`: the log may hold more.
+    Chunk(&'a [u8]),
+    /// The requested range, ending before `byte_limit`.
+    Last(&'a [u8]),
+    /// The whole log, which the server sent ignoring the range: what follows
+    /// the read part.
+    WholeLog(&'a [u8]),
+    /// More than `byte_limit`, which a server honouring it never sends.
+    Oversized,
+    /// Lines up with the read part neither way: the log was rewritten.
+    Misaligned,
+}
+
+/// Classifies `reply` to a read of at most `limit` bytes from
+/// `read_to.resume_offset()`.
+fn classify_ranged_reply<'a>(
+    read_to: &TraceCursor,
+    reply: &'a CapturedStdout,
+    limit: usize,
+) -> RangedReply<'a> {
+    if reply.is_truncated {
+        return RangedReply::Oversized;
+    }
+    if let Some(chunk) = read_to.new_bytes_in_resumed_read(&reply.bytes) {
+        return if reply.bytes.len() < limit {
+            RangedReply::Last(chunk)
+        } else {
+            RangedReply::Chunk(chunk)
+        };
+    }
+    match read_to.new_bytes_in_full_read(&reply.bytes) {
+        Some(rest) => RangedReply::WholeLog(rest),
+        None => RangedReply::Misaligned,
+    }
+}
+
 impl GlabBackend {
     pub fn new() -> Self {
         Self { tx: None }
@@ -437,6 +509,83 @@ impl GlabBackend {
             desc.to_string(),
         )
         .await
+    }
+
+    async fn run_glab_capped(
+        &self,
+        args: &[&str],
+        desc: &str,
+        max_stdout_bytes: usize,
+    ) -> Result<CapturedStdout> {
+        run_glab_bounded(
+            self.tx.clone(),
+            args.iter().map(|a| (*a).to_string()).collect(),
+            desc.to_string(),
+            Some(max_stdout_bytes),
+        )
+        .await
+    }
+
+    fn job_trace_endpoint(project: &str, job_id: u64) -> String {
+        format!(
+            "/projects/{}/jobs/{}/trace",
+            Self::encode_path(project),
+            job_id
+        )
+    }
+
+    async fn read_job_trace(&self, endpoint: &str) -> Result<CapturedStdout> {
+        self.run_glab_capped(&["api", endpoint], "Fetching Job Log", JOB_TRACE_MAX_BYTES)
+            .await
+    }
+
+    /// Reads what the log gained since `cursor` with `byte_offset` and
+    /// `byte_limit`, one chunk of at most `GITLAB_TRACE_RANGE_MAX_BYTES` per
+    /// request. `None` when the replies do not line up with `cursor` and a full
+    /// read has to settle it: the log was rewritten, or the server ignores the
+    /// range and its whole log did not fit in one reply.
+    async fn read_job_trace_ranges(
+        &self,
+        project: &str,
+        endpoint: &str,
+        cursor: &TraceCursor,
+    ) -> Result<Option<TraceUpdate>> {
+        let mut read_to = cursor.clone();
+        let mut new_bytes = Vec::new();
+        loop {
+            let remaining = read_to.remaining_bytes();
+            if remaining == 0 {
+                return Ok(Some(cursor.append_update(new_bytes, true)));
+            }
+            let limit = (read_to.overlap_len() + remaining).min(GITLAB_TRACE_RANGE_MAX_BYTES);
+            let ranged = format!(
+                "{endpoint}?byte_offset={}&byte_limit={limit}",
+                read_to.resume_offset()
+            );
+            let reply = self
+                .run_glab_capped(&["api", &ranged], "Following Job Log", limit)
+                .await?;
+            match classify_ranged_reply(&read_to, &reply, limit) {
+                RangedReply::Chunk(chunk) => {
+                    new_bytes.extend_from_slice(chunk);
+                    read_to.advance(chunk);
+                }
+                RangedReply::Last(chunk) => {
+                    new_bytes.extend_from_slice(chunk);
+                    return Ok(Some(cursor.append_update(new_bytes, false)));
+                }
+                RangedReply::WholeLog(rest) => {
+                    remember_ignored_trace_ranges(project);
+                    new_bytes.extend_from_slice(rest);
+                    return Ok(Some(cursor.append_update(new_bytes, false)));
+                }
+                RangedReply::Oversized => {
+                    remember_ignored_trace_ranges(project);
+                    return Ok(None);
+                }
+                RangedReply::Misaligned => return Ok(None),
+            }
+        }
     }
 
     /// Build the `glab` arguments that fetch approval/mergeability state for
@@ -1220,11 +1369,15 @@ impl Backend for GlabBackend {
     }
 
     async fn get_mr_diff(&self, project: &str, iid: u64) -> Result<String> {
-        self.run_glab(
-            &["mr", "diff", &iid.to_string(), "-R", project],
-            "Fetching MR Diff",
-        )
-        .await
+        let diff = self
+            .run_glab_capped(
+                &["mr", "diff", &iid.to_string(), "-R", project],
+                "Fetching MR Diff",
+                MR_DIFF_MAX_BYTES,
+            )
+            .await?;
+        ensure_complete_diff(diff.is_truncated, &format!("MR !{iid}"))?;
+        Ok(String::from_utf8(diff.bytes)?)
     }
 
     async fn list_mr_notes(
@@ -1847,11 +2000,33 @@ impl Backend for GlabBackend {
         Ok(serde_json::from_str(&raw)?)
     }
 
-    async fn get_job_trace(&self, project: &str, job_id: u64) -> Result<String> {
-        let encoded = Self::encode_path(project);
-        let endpoint = format!("/projects/{encoded}/jobs/{job_id}/trace");
-        self.raw_api(&endpoint, "GET", None, "Fetching Job Log")
-            .await
+    async fn get_job_trace(&self, project: &str, job_id: u64) -> Result<JobTrace> {
+        let log = self
+            .read_job_trace(&Self::job_trace_endpoint(project, job_id))
+            .await?;
+        Ok(JobTrace::from_read(&log.bytes, log.is_truncated))
+    }
+
+    async fn get_job_trace_since(
+        &self,
+        project: &str,
+        job_id: u64,
+        cursor: &TraceCursor,
+    ) -> Result<TraceUpdate> {
+        let endpoint = Self::job_trace_endpoint(project, job_id);
+        if !ignores_trace_ranges(project) {
+            if let Some(update) = self
+                .read_job_trace_ranges(project, &endpoint, cursor)
+                .await?
+            {
+                return Ok(update);
+            }
+        }
+        let log = self.read_job_trace(&endpoint).await?;
+        Ok(match cursor.new_bytes_in_full_read(&log.bytes) {
+            Some(new_bytes) => cursor.append_update(new_bytes.to_vec(), log.is_truncated),
+            None => cursor.restart_update(JobTrace::from_read(&log.bytes, log.is_truncated)),
+        })
     }
 
     async fn retry_pipeline(&self, project: &str, pipeline_id: u64) -> Result<()> {
@@ -3790,5 +3965,105 @@ mod tests {
 
         // Malformed / missing field
         assert!(parse_group_projects(r#"[{"id": 1}]"#).is_err());
+    }
+
+    /// `len` bytes of numbered lines, so no two stretches of it are equal.
+    fn log_of(len: usize) -> Vec<u8> {
+        (0..)
+            .flat_map(|line: usize| format!("{line:07}\n").into_bytes())
+            .take(len)
+            .collect()
+    }
+
+    fn reply(bytes: &[u8], is_truncated: bool) -> CapturedStdout {
+        CapturedStdout {
+            bytes: bytes.to_vec(),
+            is_truncated,
+        }
+    }
+
+    /// A 5000-byte log, read up to byte 3000, and where a resumed read starts.
+    fn log_read_to_3000() -> (Vec<u8>, TraceCursor, usize) {
+        let log = log_of(5000);
+        let cursor = JobTrace::from_read(&log[..3000], false).cursor().clone();
+        let resume = cursor.resume_offset();
+        (log, cursor, resume)
+    }
+
+    #[test]
+    fn honoured_reply_filling_the_limit_is_a_chunk_with_more_to_follow() {
+        let (log, cursor, resume) = log_read_to_3000();
+        let reply = reply(&log[resume..resume + 1500], false);
+
+        assert_eq!(
+            classify_ranged_reply(&cursor, &reply, 1500),
+            RangedReply::Chunk(&log[3000..resume + 1500])
+        );
+    }
+
+    #[test]
+    fn honoured_reply_short_of_the_limit_is_the_last_chunk() {
+        let (log, cursor, resume) = log_read_to_3000();
+        let reply = reply(&log[resume..], false);
+
+        assert_eq!(
+            classify_ranged_reply(&cursor, &reply, GITLAB_TRACE_RANGE_MAX_BYTES),
+            RangedReply::Last(&log[3000..])
+        );
+    }
+
+    #[test]
+    fn honoured_reply_holding_only_the_overlap_is_an_empty_last_chunk() {
+        let (log, cursor, resume) = log_read_to_3000();
+        let reply = reply(&log[resume..3000], false);
+
+        assert_eq!(
+            classify_ranged_reply(&cursor, &reply, GITLAB_TRACE_RANGE_MAX_BYTES),
+            RangedReply::Last(&[])
+        );
+    }
+
+    #[test]
+    fn whole_log_sent_for_a_ranged_read_yields_what_follows_the_read_part() {
+        let (log, cursor, _) = log_read_to_3000();
+        let reply = reply(&log, false);
+
+        assert_eq!(
+            classify_ranged_reply(&cursor, &reply, GITLAB_TRACE_RANGE_MAX_BYTES),
+            RangedReply::WholeLog(&log[3000..])
+        );
+    }
+
+    #[test]
+    fn reply_over_the_limit_is_oversized_even_when_it_lines_up() {
+        let (log, cursor, resume) = log_read_to_3000();
+        let reply = reply(&log[resume..resume + 1500], true);
+
+        assert_eq!(
+            classify_ranged_reply(&cursor, &reply, 1500),
+            RangedReply::Oversized
+        );
+    }
+
+    #[test]
+    fn reply_matching_neither_read_is_misaligned() {
+        let (_, cursor, _) = log_read_to_3000();
+        let reply = reply(&[b'z'; 5000], false);
+
+        assert_eq!(
+            classify_ranged_reply(&cursor, &reply, GITLAB_TRACE_RANGE_MAX_BYTES),
+            RangedReply::Misaligned
+        );
+    }
+
+    #[test]
+    fn empty_reply_after_the_log_shrank_is_misaligned() {
+        let (_, cursor, _) = log_read_to_3000();
+        let reply = reply(b"", false);
+
+        assert_eq!(
+            classify_ranged_reply(&cursor, &reply, GITLAB_TRACE_RANGE_MAX_BYTES),
+            RangedReply::Misaligned
+        );
     }
 }

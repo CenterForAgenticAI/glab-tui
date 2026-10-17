@@ -2,6 +2,11 @@
 
 All notable changes to this project will be documented in this file.
 
+## [Unreleased]
+
+### Bug Fixes
+- **Bounded job logs and diffs**: Job logs are read up to 16 MiB and a longer one is marked `[TRUNCATED: first 16 MiB]` in the Jobs pane title. A diff over 32 MiB is refused with an error instead of being buffered whole. glab-tui stops reading (and kills the CLI) at the limit. Follow mode no longer downloads and re-parses the whole log every 5 seconds: on GitLab it asks only for the bytes after what is shown (`byte_offset`/`byte_limit`, with a full read on servers that predate them), on GitHub it makes no call (logs only exist for completed jobs), and the pane parses only the new lines and keeps the log on screen while polling (#559).
+
 ## [0.9.3] - 2026-10-08
 
 ### Features
