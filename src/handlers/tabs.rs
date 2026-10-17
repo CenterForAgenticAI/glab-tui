@@ -51,7 +51,7 @@ fn spawn_open_diff(
 /// The `tx` parameter is accepted (not consumed) so existing keypress handler
 /// call sites keep passing their sender without churn; the dispatcher is what
 /// ultimately drives `spawn_fetch_related_mrs`.
-pub(crate) fn maybe_fetch_related_mrs(app: &mut App, _tx: &UnboundedSender<Event>) {
+pub fn maybe_fetch_related_mrs(app: &mut App, _tx: &UnboundedSender<Event>) {
     let Some(iid) = app
         .issues
         .state
@@ -77,7 +77,7 @@ pub(crate) fn maybe_fetch_related_mrs(app: &mut App, _tx: &UnboundedSender<Event
 }
 
 /// Record a request to fetch linked issues for the currently selected MR/PR.
-pub(crate) fn maybe_fetch_mr_related_issues(app: &mut App, _tx: &UnboundedSender<Event>) {
+pub fn maybe_fetch_mr_related_issues(app: &mut App, _tx: &UnboundedSender<Event>) {
     let Some(iid) = app
         .mrs
         .state
@@ -132,7 +132,7 @@ fn with_pr_stack(
 }
 
 /// Run a PR action whose stack the session already knows.
-pub(crate) fn run_stack_action(
+pub fn run_stack_action(
     app: &mut App,
     project: &str,
     pr_number: u64,
@@ -3230,7 +3230,7 @@ pub(crate) fn jump_to_mr_tab(
 }
 
 /// Public entry point used by the related-MRs selector.
-pub(crate) fn jump_to_mr_tab_from_selector(
+pub fn jump_to_mr_tab_from_selector(
     app: &mut crate::app::App,
     mr_iid: u64,
     tx: tokio::sync::mpsc::UnboundedSender<crate::event::Event>,
@@ -3302,7 +3302,7 @@ pub(crate) fn jump_to_issue_tab(
 }
 
 /// Public entry point used by the linked-issues selector.
-pub(crate) fn jump_to_issue_tab_from_selector(
+pub fn jump_to_issue_tab_from_selector(
     app: &mut crate::app::App,
     issue_iid: u64,
     tx: tokio::sync::mpsc::UnboundedSender<crate::event::Event>,
