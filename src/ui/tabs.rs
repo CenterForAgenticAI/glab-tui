@@ -4023,6 +4023,7 @@ mod tests {
             ["production", "available", "N/A", "https://prod.example"],
         );
     }
+
     #[test]
     fn render_tab_jobs_saturates_follow_scroll_past_u16_rows() {
         let text: String = (0..70_000).map(|line| format!("{line}\n")).collect();
