@@ -591,6 +591,7 @@ pub fn build_pipeline_document(
         content: crate::app::InspectorContent::PipelineStages(jobs.to_vec()),
     }
 }
+
 pub fn build_milestone_document(
     milestone: &crate::domain::milestones::Milestone,
     issues: Option<&[crate::domain::issues::Issue]>,

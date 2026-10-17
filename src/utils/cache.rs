@@ -1,3 +1,4 @@
+use super::private_fs;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::fs;
@@ -37,9 +38,14 @@ pub struct ProjectCache {
         HashMap<crate::app::Tab, HashMap<String, std::collections::HashSet<String>>>,
 }
 
+fn prepare_cache_dir() -> PathBuf {
+    let dir = get_cache_dir();
+    let _ = private_fs::create_owned_dir(&dir);
+    dir
+}
+
 fn get_cache_file_path(project_context: &str) -> PathBuf {
-    let mut path = get_cache_dir();
-    let _ = fs::create_dir_all(&path);
+    let mut path = prepare_cache_dir();
     path.push(cache_file_name(project_context));
     path
 }
@@ -57,13 +63,12 @@ pub fn load_cache(project_context: &str) -> ProjectCache {
 pub fn save_cache(project_context: &str, cache: &ProjectCache) {
     let path = get_cache_file_path(project_context);
     if let Ok(content) = serde_json::to_string(cache) {
-        let _ = fs::write(path, content);
+        let _ = private_fs::write(&path, content);
     }
 }
 
 fn get_recent_repos_file_path() -> PathBuf {
-    let mut path = get_cache_dir();
-    let _ = fs::create_dir_all(&path);
+    let mut path = prepare_cache_dir();
     path.push("recent_repos.json");
     path
 }
@@ -100,13 +105,12 @@ pub fn add_recent_repo(repo_path: &str) {
 
     let path = get_recent_repos_file_path();
     if let Ok(content) = serde_json::to_string(&repos) {
-        let _ = fs::write(path, content);
+        let _ = private_fs::write(&path, content);
     }
 }
 
 fn get_recent_groups_file_path() -> PathBuf {
-    let mut path = get_cache_dir();
-    let _ = fs::create_dir_all(&path);
+    let mut path = prepare_cache_dir();
     path.push("recent_groups.json");
     path
 }
@@ -170,13 +174,13 @@ pub fn add_recent_group(group: &str) {
 
     let path = get_recent_groups_file_path();
     if let Ok(content) = serde_json::to_string(&groups) {
-        let _ = fs::write(path, content);
+        let _ = private_fs::write(&path, content);
     }
 }
 
 /// Batched counterpart of `add_recent_group`. Mirrors its semantics:
 /// groups are processed in slice order, each moves to position 0, the
-/// list is truncated to 20 entries, and a single `fs::write` happens
+/// list is truncated to 20 entries, and a single write happens
 /// at the end (or none at all when the slice is empty/whitespace).
 /// Callers building a "new groups to persist" list inside a loop should
 /// prefer this over N individual `add_recent_group` calls — the per-call
@@ -205,7 +209,7 @@ pub fn add_recent_groups(groups: &[String]) {
 
     let path = get_recent_groups_file_path();
     if let Ok(content) = serde_json::to_string(&existing) {
-        let _ = fs::write(path, content);
+        let _ = private_fs::write(&path, content);
     }
 }
 
@@ -267,7 +271,7 @@ pub fn clean_cache(dry_run: bool) -> CleanCacheResult {
 
     if !dry_run && !dead_repos.is_empty() {
         if let Ok(content) = serde_json::to_string(&live_repos) {
-            let _ = fs::write(&recent_path, content);
+            let _ = private_fs::write(&recent_path, content);
         }
     }
 
@@ -612,5 +616,43 @@ mod tests {
             groups.iter().any(|g| g == "octo"),
             "GitHub org derived from cached repo must be available: {groups:?}"
         );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_dir_and_files_are_owner_only() {
+        use crate::utils::private_fs::mode_of;
+        let _guard = crate::config::TEST_ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _env = crate::config::EnvGuard::isolate_home(home.path());
+        let repo = home.path().join("repo");
+        fs::create_dir_all(repo.join(".git")).unwrap();
+
+        save_cache("group/project", &ProjectCache::default());
+        add_recent_repo(&repo.to_string_lossy());
+        add_recent_group("group");
+
+        let cache_dir = get_cache_dir();
+        assert_eq!(mode_of(&cache_dir), 0o700);
+        assert_eq!(mode_of(&cache_dir.join("group_project.json")), 0o600);
+        assert_eq!(mode_of(&cache_dir.join("recent_repos.json")), 0o600);
+        assert_eq!(mode_of(&cache_dir.join("recent_groups.json")), 0o600);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn cache_dir_left_world_readable_is_tightened_on_load() {
+        use crate::utils::private_fs::mode_of;
+        use std::os::unix::fs::PermissionsExt;
+        let _guard = crate::config::TEST_ENV_MUTEX.lock().unwrap();
+        let home = tempdir().unwrap();
+        let _env = crate::config::EnvGuard::isolate_home(home.path());
+        let cache_dir = get_cache_dir();
+        fs::create_dir_all(&cache_dir).unwrap();
+        fs::set_permissions(&cache_dir, fs::Permissions::from_mode(0o755)).unwrap();
+
+        load_cache("group/project");
+
+        assert_eq!(mode_of(&cache_dir), 0o700);
     }
 }

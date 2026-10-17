@@ -1,3 +1,4 @@
+use crate::utils::private_fs;
 use ratatui::style::Color;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
@@ -813,11 +814,18 @@ pub fn use_config_file(file: PathBuf) {
 }
 
 fn config_dir() -> PathBuf {
-    if let Ok(path) = std::env::var("GLAB_TUI_CONFIG") {
-        let mut p = PathBuf::from(path);
-        p.pop();
-        return p;
-    }
+    user_chosen_config_dir().unwrap_or_else(default_config_dir)
+}
+
+/// The parent of a `GLAB_TUI_CONFIG` file: a directory the user picked, whose
+/// mode glab-tui must not change.
+fn user_chosen_config_dir() -> Option<PathBuf> {
+    let mut dir = PathBuf::from(std::env::var("GLAB_TUI_CONFIG").ok()?);
+    dir.pop();
+    Some(dir)
+}
+
+fn default_config_dir() -> PathBuf {
     let xdg_config = std::env::var("XDG_CONFIG_HOME")
         .map(PathBuf::from)
         .unwrap_or_else(|_| home_dir().join(".config"));
@@ -832,14 +840,14 @@ fn themes_dir() -> PathBuf {
 
 fn ensure_themes() {
     let dir = themes_dir();
-    let _ = std::fs::create_dir_all(&dir);
+    let _ = private_fs::create_dir_all(&dir);
     // Always overwrite bundled themes so users receive fixes and new tokens
     // (e.g. diff_gutter_bg) on upgrade without deleting the themes dir.
     // User-created themes use filenames not present in BUNDLED_THEMES and are
     // never touched here.
     for (name, toml_str) in BUNDLED_THEMES {
         let theme_path = dir.join(format!("{name}.toml"));
-        let _ = std::fs::write(&theme_path, toml_str);
+        let _ = private_fs::write(&theme_path, toml_str);
     }
 }
 
@@ -1728,8 +1736,17 @@ impl Config {
         if let Some(file) = CONFIG_FILE_OVERRIDE.get() {
             return file.clone();
         }
-        let mut path = config_dir();
-        let _ = std::fs::create_dir_all(&path);
+        let mut path = match user_chosen_config_dir() {
+            Some(dir) => {
+                let _ = private_fs::create_dir_all(&dir);
+                dir
+            }
+            None => {
+                let dir = default_config_dir();
+                let _ = private_fs::create_owned_dir(&dir);
+                dir
+            }
+        };
         path.push("config.toml");
         path
     }
@@ -2013,7 +2030,7 @@ toggle_wrap = "w"
         let path = Self::config_path();
         match toml::to_string(self) {
             Ok(toml_str) => {
-                let _ = std::fs::write(&path, &toml_str);
+                let _ = private_fs::write(&path, &toml_str);
             }
             Err(e) => {
                 eprintln!("Error serializing config: {e}");
@@ -2105,7 +2122,7 @@ impl Config {
             SaveMenu::Local => {
                 if let Some(root) = find_git_root() {
                     let repo_config_dir = root.join(".glab-tui");
-                    let _ = std::fs::create_dir_all(&repo_config_dir);
+                    let _ = private_fs::create_dir_all(&repo_config_dir);
                     repo_config_dir.join("config.toml")
                 } else {
                     actual_target = SaveMenu::Global;
@@ -2237,7 +2254,7 @@ impl Config {
         }
 
         let toml_str = toml::to_string_pretty(&merged_value)?;
-        std::fs::write(&target_path, &toml_str)?;
+        private_fs::write(&target_path, &toml_str)?;
 
         Ok(())
     }
@@ -2618,6 +2635,62 @@ page_size = 250
         assert!(!reloaded.prefetch_tabs);
 
         drop(guard);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_dir_and_files_are_owner_only() {
+        use crate::utils::private_fs::mode_of;
+        let _lock = TEST_ENV_MUTEX.lock().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::isolate_home(temp_dir.path());
+
+        Config::load();
+        Config::default().save_layout(SaveMenu::Global).unwrap();
+
+        let config_dir = temp_dir.path().join(".config").join("glab-tui");
+        assert_eq!(mode_of(&config_dir), 0o700);
+        assert_eq!(mode_of(&config_dir.join("config.toml")), 0o600);
+        assert_eq!(mode_of(&config_dir.join("themes")), 0o700);
+        assert_eq!(
+            mode_of(&config_dir.join("themes").join("default.toml")),
+            0o600
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn config_dir_left_world_readable_is_tightened_on_load() {
+        use crate::utils::private_fs::mode_of;
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = TEST_ENV_MUTEX.lock().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::isolate_home(temp_dir.path());
+        let config_dir = temp_dir.path().join(".config").join("glab-tui");
+        std::fs::create_dir_all(&config_dir).unwrap();
+        std::fs::set_permissions(&config_dir, std::fs::Permissions::from_mode(0o755)).unwrap();
+
+        Config::load();
+
+        assert_eq!(mode_of(&config_dir), 0o700);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn glab_tui_config_parent_keeps_its_mode() {
+        use crate::utils::private_fs::mode_of;
+        use std::os::unix::fs::PermissionsExt;
+        let _lock = TEST_ENV_MUTEX.lock().unwrap();
+        let temp_dir = tempfile::tempdir().unwrap();
+        let _guard = EnvGuard::isolate_home(temp_dir.path());
+        let chosen = temp_dir.path().join("dotfiles");
+        std::fs::create_dir_all(&chosen).unwrap();
+        std::fs::set_permissions(&chosen, std::fs::Permissions::from_mode(0o755)).unwrap();
+        unsafe { std::env::set_var("GLAB_TUI_CONFIG", chosen.join("glab-tui.toml")) };
+
+        Config::load();
+
+        assert_eq!(mode_of(&chosen), 0o755);
     }
 
     #[test]
