@@ -6,6 +6,13 @@ use crate::domain::review::DraftComment;
 use crate::domain::review_threads::{ReviewThread, group_threads};
 use crate::domain::state_query::{StateQueries, StateQuery};
 use crate::domain::workflow_inputs::WorkflowInput;
+use crate::ui::list_tab::branches::BranchColumn;
+use crate::ui::list_tab::environments::EnvironmentColumn;
+use crate::ui::list_tab::releases::ReleaseColumn;
+use crate::ui::list_tab::runners::RunnerColumn;
+use crate::ui::list_tab::{
+    ListNavigation, ListTab, ViewInputs, column_labels, default_column_labels,
+};
 use crate::utils::format::{expand_tabs, strip_ansi_escapes};
 use crate::utils::ui::StatefulTable;
 use fuzzy_matcher::FuzzyMatcher;
@@ -26,7 +33,7 @@ static THEME_SET: LazyLock<ThemeSet> = LazyLock::new(ThemeSet::load_defaults);
 /// Single shared fuzzy matcher. Reusing one instance avoids allocating a
 /// `SkimMatcherV2` on every filter keystroke (the search bar filters on each
 /// key press).
-static FUZZY_MATCHER: LazyLock<SkimMatcherV2> = LazyLock::new(SkimMatcherV2::default);
+pub(crate) static FUZZY_MATCHER: LazyLock<SkimMatcherV2> = LazyLock::new(SkimMatcherV2::default);
 
 trait ClipboardWriter {
     fn set_text(&mut self, text: String) -> anyhow::Result<()>;
@@ -435,19 +442,12 @@ impl Tab {
                 cols.push("Duration");
                 cols
             }
-            Tab::Runners => vec!["ID", "Description", "Status", "Active"],
-            Tab::Releases => vec![
-                "Tag",
-                "Release Name",
-                "Date",
-                "Author",
-                "Assets",
-                "Release Notes",
-            ],
+            Tab::Runners => column_labels::<RunnerColumn>(),
+            Tab::Releases => column_labels::<ReleaseColumn>(),
             Tab::Todos => vec!["State", "Project", "Type", "ID", "Title", "Updated"],
             Tab::Milestones => vec!["ID", "State", "Title", "Progress", "Due Date"],
-            Tab::Branches => vec!["Name", "Default", "Protected", "SHA"],
-            Tab::Environments => vec!["Name", "State", "Deployment Status", "URL"],
+            Tab::Branches => column_labels::<BranchColumn>(),
+            Tab::Environments => column_labels::<EnvironmentColumn>(),
             Tab::Terminal => vec![],
         }
     }
@@ -502,12 +502,12 @@ impl Tab {
                     vec!["ID", "Stage", "Status", "Name", "Matrix"]
                 }
             }
-            Tab::Runners => vec!["ID", "Description", "Status", "Active"],
-            Tab::Releases => vec!["Tag", "Release Name", "Date"],
+            Tab::Runners => default_column_labels::<RunnerColumn>(),
+            Tab::Releases => default_column_labels::<ReleaseColumn>(),
             Tab::Todos => vec!["State", "Project", "Type", "ID", "Title", "Updated"],
             Tab::Milestones => vec!["ID", "State", "Title", "Progress", "Due Date"],
-            Tab::Branches => vec!["Name", "Default", "Protected"],
-            Tab::Environments => vec!["Name", "State", "Deployment Status"],
+            Tab::Branches => default_column_labels::<BranchColumn>(),
+            Tab::Environments => default_column_labels::<EnvironmentColumn>(),
             Tab::Terminal => vec![],
         }
     }
@@ -3805,8 +3805,8 @@ pub struct App {
     /// rejections that never ran a CLI command.  Controls the hint line shown
     /// in the toast.
     pub error_has_cli_detail: bool,
-    pub runners: StatefulTable<crate::domain::runners::Runner>,
-    pub releases: StatefulTable<crate::domain::releases::Release>,
+    pub runners: ListTab<RunnerColumn>,
+    pub releases: ListTab<ReleaseColumn>,
     pub pipeline_jobs: std::collections::HashMap<u64, Vec<crate::domain::pipelines::Job>>,
     pub pipeline_nav: Vec<NavFrame>,
     pub pending_triggers: Vec<crate::domain::pipelines::PendingTrigger>,
@@ -3951,8 +3951,8 @@ pub struct App {
     /// Milestones progress column to avoid per-row API calls.
     pub milestone_progress_cache: std::collections::HashMap<u64, (usize, usize)>,
     pub terminal_scroll: usize,
-    pub branches: StatefulTable<crate::domain::branches::Branch>,
-    pub environments: StatefulTable<crate::domain::deployments::Environment>,
+    pub branches: ListTab<BranchColumn>,
+    pub environments: ListTab<EnvironmentColumn>,
     pub environment_deployments: Option<EnvironmentDeployments>,
     pub group_by_column: std::collections::HashMap<Tab, Option<String>>,
     pub group_ascending: std::collections::HashMap<Tab, bool>,
@@ -4012,8 +4012,8 @@ impl Default for App {
             error_message: None,
             error_message_at: None,
             error_has_cli_detail: false,
-            runners: StatefulTable::with_items(vec![]),
-            releases: StatefulTable::with_items(vec![]),
+            runners: ListTab::default(),
+            releases: ListTab::default(),
             pipeline_jobs: std::collections::HashMap::new(),
             pipeline_nav: Vec::new(),
             pending_triggers: Vec::new(),
@@ -4103,8 +4103,8 @@ impl Default for App {
             milestone_issues_cache: std::collections::HashMap::new(),
             milestone_progress_cache: std::collections::HashMap::new(),
             terminal_scroll: 0,
-            branches: StatefulTable::with_items(vec![]),
-            environments: StatefulTable::with_items(vec![]),
+            branches: ListTab::default(),
+            environments: ListTab::default(),
             environment_deployments: None,
             group_by_column: std::collections::HashMap::new(),
             group_ascending: std::collections::HashMap::new(),
@@ -4140,8 +4140,7 @@ pub(crate) fn milestone_state_display(raw: &str) -> &'static str {
 }
 
 /// Map a runner's raw `status` field to the uppercase display text shown
-/// in the table cell. Used by both `runner_filter_values` (the column
-/// filter picker) and `render_tab_runners`.
+/// in the Runners table's Status cell, which its column filter also offers.
 pub(crate) fn runner_status_display(raw: &str) -> &'static str {
     match raw {
         "online" => "ONLINE",
@@ -4151,24 +4150,37 @@ pub(crate) fn runner_status_display(raw: &str) -> &'static str {
     }
 }
 
-/// Text the Branches table shows in its Default and Protected cells. Used by
-/// both `branch_filter_values` (the column filter picker) and
-/// `render_tab_branches`.
-pub(crate) fn branch_flag_display(is_set: bool) -> &'static str {
-    if is_set { "YES" } else { "NO" }
-}
-
-/// Group-by sort key: numeric cell text (IDs) orders by value, everything
-/// else lexically. Numbers sort before text.
-#[derive(PartialEq, Eq, PartialOrd, Ord)]
-enum GroupKey {
-    Number(u64),
-    Text(String),
-}
-
-impl GroupKey {
-    fn new(value: String) -> Self {
-        value.parse().map(Self::Number).unwrap_or(Self::Text(value))
+/// Whether a row whose `col` cell has `values` passes the column filter
+/// `selected`. Text columns match case-insensitive substrings; the rest
+/// match exactly, also accepting the raw API values older configs saved.
+pub(crate) fn column_filter_matches(
+    col: &str,
+    values: &[String],
+    selected: &HashSet<String>,
+) -> bool {
+    let is_text = matches!(
+        col,
+        "Project" | "Title" | "Name" | "Ref" | "Tag" | "Release Name"
+    );
+    if is_text {
+        values.iter().any(|v| {
+            selected.contains(v)
+                || selected.iter().any(|s| {
+                    let norm_v = v.to_lowercase();
+                    let norm_s = s.to_lowercase();
+                    norm_v == norm_s || norm_v.contains(&norm_s) || norm_s.contains(&norm_v)
+                })
+        })
+    } else {
+        values.iter().any(|v| {
+            let norm_v = App::normalize_filter_value(v);
+            selected.contains(v)
+                || selected.contains(norm_v)
+                || selected.iter().any(|s| {
+                    let norm_s = App::normalize_filter_value(s);
+                    norm_s == v.as_str() || norm_s == norm_v
+                })
+        })
     }
 }
 
@@ -4292,12 +4304,12 @@ impl App {
         self.issues.state.select(Some(0));
         self.mrs.state.select(Some(0));
         self.pipelines.state.select(Some(0));
-        self.runners.state.select(Some(0));
-        self.releases.state.select(Some(0));
+        self.runners.reset_cursor();
+        self.releases.reset_cursor();
         self.todos.state.select(Some(0));
         self.milestones.state.select(Some(0));
-        self.branches.state.select(Some(0));
-        self.environments.state.select(Some(0));
+        self.branches.reset_cursor();
+        self.environments.reset_cursor();
     }
 
     pub fn drill_into(&mut self, repo: String) {
@@ -4885,9 +4897,7 @@ impl App {
 
     pub fn selected_branch_name(&self) -> Option<String> {
         self.branches
-            .state
-            .selected()
-            .and_then(|index| self.filtered_branches().get(index).copied())
+            .cursor_row()
             .map(|b| b.name.clone())
             .filter(|name| !name.is_empty())
     }
@@ -5089,19 +5099,100 @@ impl App {
             .unwrap_or(BackendKind::GitLab)
     }
 
-    pub fn active_table_state_mut(&mut self) -> Option<&mut ratatui::widgets::TableState> {
+    /// Table state of a tab not yet backed by a `ListTab`.
+    fn legacy_table_state_mut(&mut self) -> Option<&mut ratatui::widgets::TableState> {
         match self.active_tab {
             Tab::Issues => Some(&mut self.issues.state),
             Tab::MergeRequests => Some(&mut self.mrs.state),
             Tab::Pipelines => Some(&mut self.pipelines.state),
             Tab::Jobs => Some(&mut self.jobs.state),
-            Tab::Runners => Some(&mut self.runners.state),
-            Tab::Releases => Some(&mut self.releases.state),
             Tab::Todos => Some(&mut self.todos.state),
             Tab::Milestones => Some(&mut self.milestones.state),
-            Tab::Branches => Some(&mut self.branches.state),
-            Tab::Environments => Some(&mut self.environments.state),
-            Tab::Terminal => None,
+            Tab::Runners | Tab::Releases | Tab::Branches | Tab::Environments | Tab::Terminal => {
+                None
+            }
+        }
+    }
+
+    /// The `ListTab` behind `tab`. Only the active tab's view is brought up
+    /// to date, so pass `self.active_tab`.
+    pub fn list_navigation_mut(&mut self, tab: Tab) -> Option<&mut dyn ListNavigation> {
+        self.sync_list_views();
+        match tab {
+            Tab::Runners => Some(&mut self.runners),
+            Tab::Releases => Some(&mut self.releases),
+            Tab::Branches => Some(&mut self.branches),
+            Tab::Environments => Some(&mut self.environments),
+            _ => None,
+        }
+    }
+
+    fn list_navigation(&self, tab: Tab) -> Option<&dyn ListNavigation> {
+        match tab {
+            Tab::Runners => Some(&self.runners),
+            Tab::Releases => Some(&self.releases),
+            Tab::Branches => Some(&self.branches),
+            Tab::Environments => Some(&self.environments),
+            _ => None,
+        }
+    }
+
+    /// Rebuild the active tab's `ListTab` view if its rows or view inputs
+    /// changed. Hidden tabs are left alone: the search query is shared by
+    /// every tab, and rebuilding a hidden view with it would move that tab's
+    /// cursor off a row the search hides.
+    pub fn sync_list_views(&mut self) {
+        let Self {
+            active_tab,
+            ref mut runners,
+            ref mut releases,
+            ref mut branches,
+            ref mut environments,
+            ref search_query,
+            ref enabled_columns,
+            ref column_filters,
+            ref group_by_column,
+            ref group_ascending,
+            ..
+        } = *self;
+        let inputs = |tab: Tab| ViewInputs {
+            query: search_query,
+            enabled_columns: enabled_columns.get(&tab),
+            column_filters: column_filters.get(&tab),
+            sort: group_by_column
+                .get(&tab)
+                .and_then(Option::as_deref)
+                .map(|col| (col, group_ascending.get(&tab).copied().unwrap_or(true))),
+        };
+        match active_tab {
+            Tab::Runners => runners.refresh(inputs(Tab::Runners)),
+            Tab::Releases => releases.refresh(inputs(Tab::Releases)),
+            Tab::Branches => branches.refresh(inputs(Tab::Branches)),
+            Tab::Environments => environments.refresh(inputs(Tab::Environments)),
+            _ => {}
+        }
+    }
+
+    /// Mouse wheel over the active table: move the selection one row.
+    pub fn scroll_active_table(&mut self, down: bool) {
+        if let Some(list) = self.list_navigation_mut(self.active_tab) {
+            list.step(down);
+        } else if let Some(state) = self.legacy_table_state_mut() {
+            let selected = state.selected().unwrap_or(0);
+            state.select(Some(if down {
+                selected.saturating_add(1)
+            } else {
+                selected.saturating_sub(1)
+            }));
+        }
+    }
+
+    /// Mouse click on the `row`-th drawn line of the active table.
+    pub fn click_active_table_row(&mut self, row: usize) {
+        if let Some(list) = self.list_navigation_mut(self.active_tab) {
+            list.select_visible_row(row);
+        } else if let Some(state) = self.legacy_table_state_mut() {
+            state.select(Some(row));
         }
     }
 
@@ -5128,12 +5219,12 @@ impl App {
             Tab::Issues => !self.issues.items.is_empty(),
             Tab::MergeRequests => !self.mrs.items.is_empty(),
             Tab::Pipelines => !self.pipelines.items.is_empty(),
-            Tab::Runners => !self.runners.items.is_empty(),
-            Tab::Releases => !self.releases.items.is_empty(),
+            Tab::Runners => !self.runners.items().is_empty(),
+            Tab::Releases => !self.releases.items().is_empty(),
             Tab::Todos => !self.todos.items.is_empty(),
             Tab::Milestones => !self.milestones.items.is_empty(),
-            Tab::Branches => !self.branches.items.is_empty(),
-            Tab::Environments => !self.environments.items.is_empty(),
+            Tab::Branches => !self.branches.items().is_empty(),
+            Tab::Environments => !self.environments.items().is_empty(),
             Tab::Jobs | Tab::Terminal => false,
         }
     }
@@ -6476,220 +6567,6 @@ impl App {
         list
     }
 
-    pub fn filter_runners_list<'a>(
-        items: &'a [crate::domain::runners::Runner],
-        query: &str,
-        enabled_cols: &std::collections::HashSet<String>,
-    ) -> Vec<&'a crate::domain::runners::Runner> {
-        if query.trim().is_empty() {
-            return items.iter().collect();
-        }
-        let matcher = &*FUZZY_MATCHER;
-        let q = query.trim();
-        let mut scored_items: Vec<(i64, &crate::domain::runners::Runner)> = items
-            .iter()
-            .filter_map(|item| {
-                let mut best_score: Option<i64> = None;
-                let mut check_match = |text: &str| {
-                    if let Some(score) = matcher.fuzzy_match(text, q) {
-                        best_score = Some(best_score.map_or(score, |best| best.max(score)));
-                    }
-                };
-                if enabled_cols.contains("ID") {
-                    check_match(&item.id.to_string());
-                }
-                if enabled_cols.contains("Description") {
-                    if let Some(desc) = &item.description {
-                        check_match(desc);
-                    }
-                }
-                if enabled_cols.contains("Status") {
-                    check_match(&item.status);
-                    check_match(runner_status_display(&item.status));
-                }
-                if enabled_cols.contains("Active") {
-                    check_match(runner_active_display(item.active));
-                }
-                best_score.map(|score| (score, item))
-            })
-            .collect();
-        scored_items.sort_by(|a, b| b.0.cmp(&a.0));
-        scored_items.into_iter().map(|(_, item)| item).collect()
-    }
-
-    pub fn runner_filter_values(item: &crate::domain::runners::Runner, col: &str) -> Vec<String> {
-        match col {
-            "ID" => vec![item.id.to_string()],
-            // Match the table cell text (`render_tab_runners` shows
-            // "ONLINE"/"PAUSED"/"OFFLINE"/"UNKNOWN"), not the raw API
-            // value. The picker is a multi-select on displayed text, so a
-            // lowercase entry would never match anything in the column.
-            "Status" => vec![runner_status_display(&item.status).to_string()],
-            "Active" => vec![runner_active_display(item.active).to_string()],
-            "Description" => item
-                .description
-                .as_ref()
-                .map(|d| vec![d.clone()])
-                .unwrap_or_default(),
-            _ => vec![],
-        }
-    }
-
-    pub fn filtered_runners_list<'a>(
-        items: &'a [crate::domain::runners::Runner],
-        query: &str,
-        enabled_columns: &std::collections::HashMap<Tab, std::collections::HashSet<String>>,
-        ascending: bool,
-        group_by_column: &Option<String>,
-    ) -> Vec<&'a crate::domain::runners::Runner> {
-        let default_set = std::collections::HashSet::new();
-        let enabled_cols = enabled_columns.get(&Tab::Runners).unwrap_or(&default_set);
-        let mut list = Self::filter_runners_list(items, query, enabled_cols);
-        if let Some(col) = group_by_column {
-            Self::sort_by_column_values(&mut list, col, ascending, Self::runner_filter_values);
-        }
-        list
-    }
-    pub fn filtered_runners(&self) -> Vec<&crate::domain::runners::Runner> {
-        let mut list = Self::filtered_runners_list(
-            &self.runners.items,
-            &self.search_query,
-            &self.enabled_columns,
-            self.group_ascending
-                .get(&Tab::Runners)
-                .copied()
-                .unwrap_or(true),
-            self.group_by_column.get(&Tab::Runners).unwrap_or(&None),
-        );
-        Self::apply_column_filters(
-            &mut list,
-            &self.column_filters,
-            Tab::Runners,
-            Self::runner_filter_values,
-        );
-        list
-    }
-
-    pub fn filter_releases_list<'a>(
-        items: &'a [crate::domain::releases::Release],
-        query: &str,
-        enabled_cols: &std::collections::HashSet<String>,
-    ) -> Vec<&'a crate::domain::releases::Release> {
-        if query.trim().is_empty() {
-            return items.iter().collect();
-        }
-        let matcher = &*FUZZY_MATCHER;
-        let q = query.trim();
-        items
-            .iter()
-            .filter(|item| {
-                let mut matches = false;
-                let mut check_match = |text: &str| {
-                    if matcher.fuzzy_match(text, q).is_some() {
-                        matches = true;
-                    }
-                };
-                if enabled_cols.contains("Tag") {
-                    check_match(&item.tag_name);
-                }
-                if enabled_cols.contains("Release Name") {
-                    check_match(&item.name);
-                }
-                if enabled_cols.contains("Date") {
-                    check_match(&item.released_at);
-                    check_match(&crate::utils::format::time_ago(&item.released_at));
-                }
-                if enabled_cols.contains("Release Notes") {
-                    if let Some(ref desc) = item.description {
-                        check_match(desc);
-                    }
-                }
-                if enabled_cols.contains("Author") {
-                    if let Some(ref a) = item.author_name {
-                        check_match(a);
-                    }
-                }
-                matches
-            })
-            .collect()
-    }
-
-    pub fn filtered_releases_list<'a>(
-        items: &'a [crate::domain::releases::Release],
-        query: &str,
-        enabled_columns: &std::collections::HashMap<Tab, std::collections::HashSet<String>>,
-        ascending: bool,
-        group_by_column: &Option<String>,
-    ) -> Vec<&'a crate::domain::releases::Release> {
-        let default_set = std::collections::HashSet::new();
-        let enabled_cols = enabled_columns.get(&Tab::Releases).unwrap_or(&default_set);
-        let mut list = Self::filter_releases_list(items, query, enabled_cols);
-        if let Some(col) = group_by_column {
-            list.sort_by(|a, b| {
-                let val_a = match col.as_str() {
-                    "Tag" => a.tag_name.clone(),
-                    "Release Name" => a.name.clone(),
-                    "Date" => a.released_at.clone(),
-                    "Release Notes" => a.description.clone().unwrap_or_default(),
-                    "Author" => a.author_name.clone().unwrap_or_default(),
-                    _ => String::new(),
-                };
-                let val_b = match col.as_str() {
-                    "Tag" => b.tag_name.clone(),
-                    "Release Name" => b.name.clone(),
-                    "Date" => b.released_at.clone(),
-                    "Release Notes" => b.description.clone().unwrap_or_default(),
-                    "Author" => b.author_name.clone().unwrap_or_default(),
-                    _ => String::new(),
-                };
-                let cmp = val_a.cmp(&val_b);
-                if !ascending { cmp.reverse() } else { cmp }
-            });
-        }
-        list
-    }
-
-    pub fn release_filter_values(
-        item: &crate::domain::releases::Release,
-        col: &str,
-    ) -> Vec<String> {
-        match col {
-            "Tag" => vec![item.tag_name.clone()],
-            "Release Name" => vec![item.name.clone()],
-            "Release Notes" => item
-                .description
-                .clone()
-                .map(|d| vec![d])
-                .unwrap_or_default(),
-            "Author" => item
-                .author_name
-                .clone()
-                .map(|a| vec![a])
-                .unwrap_or_default(),
-            _ => vec![],
-        }
-    }
-
-    pub fn filtered_releases(&self) -> Vec<&crate::domain::releases::Release> {
-        let mut list = Self::filtered_releases_list(
-            &self.releases.items,
-            &self.search_query,
-            &self.enabled_columns,
-            self.group_ascending
-                .get(&Tab::Releases)
-                .copied()
-                .unwrap_or(true),
-            self.group_by_column.get(&Tab::Releases).unwrap_or(&None),
-        );
-        Self::apply_column_filters(
-            &mut list,
-            &self.column_filters,
-            Tab::Releases,
-            Self::release_filter_values,
-        );
-        list
-    }
-
     pub fn filter_todos_list<'a>(
         items: &'a [crate::domain::notifications::Notification],
         query: &str,
@@ -7042,186 +6919,12 @@ impl App {
         list
     }
 
-    pub fn filter_branches_list<'a>(
-        items: &'a [crate::domain::branches::Branch],
-        query: &str,
-        enabled_cols: &std::collections::HashSet<String>,
-    ) -> Vec<&'a crate::domain::branches::Branch> {
-        if query.trim().is_empty() {
-            return items.iter().collect();
-        }
-        let matcher = &*FUZZY_MATCHER;
-        let q = query.trim();
-        items
-            .iter()
-            .filter(|item| {
-                let mut matches = false;
-                let mut check_match = |text: &str| {
-                    if matcher.fuzzy_match(text, q).is_some() {
-                        matches = true;
-                    }
-                };
-                if enabled_cols.contains("Name") {
-                    check_match(&item.name);
-                }
-                if enabled_cols.contains("SHA") {
-                    check_match(&item.commit_sha);
-                }
-                matches
-            })
-            .collect()
-    }
-
-    /// Filter values for one Branches column. The first value is the cell
-    /// text the picker offers; the trailing `true`/`false` keeps Default and
-    /// Protected filters saved before the picker used the cell text working.
-    pub fn branch_filter_values(item: &crate::domain::branches::Branch, col: &str) -> Vec<String> {
-        match col {
-            "Name" => vec![item.name.clone()],
-            "Default" => vec![
-                branch_flag_display(item.default).to_string(),
-                item.default.to_string(),
-            ],
-            "Protected" => vec![
-                branch_flag_display(item.protected).to_string(),
-                item.protected.to_string(),
-            ],
-            "SHA" => Some(item.commit_sha.clone())
-                .filter(|sha| !sha.is_empty())
-                .into_iter()
-                .collect(),
-            _ => vec![],
-        }
-    }
-
-    pub fn filtered_branches_list<'a>(
-        items: &'a [crate::domain::branches::Branch],
-        query: &str,
-        enabled_columns: &std::collections::HashMap<Tab, std::collections::HashSet<String>>,
-        ascending: bool,
-        group_by_column: &Option<String>,
-    ) -> Vec<&'a crate::domain::branches::Branch> {
-        let default_set = std::collections::HashSet::new();
-        let enabled_cols = enabled_columns.get(&Tab::Branches).unwrap_or(&default_set);
-        let mut list = Self::filter_branches_list(items, query, enabled_cols);
-        if let Some(col) = group_by_column {
-            Self::sort_by_column_values(&mut list, col, ascending, Self::branch_filter_values);
-        }
-        list
-    }
-
-    pub fn filtered_branches(&self) -> Vec<&crate::domain::branches::Branch> {
-        let mut list = Self::filtered_branches_list(
-            &self.branches.items,
-            &self.search_query,
-            &self.enabled_columns,
-            self.group_ascending
-                .get(&Tab::Branches)
-                .copied()
-                .unwrap_or(true),
-            self.group_by_column.get(&Tab::Branches).unwrap_or(&None),
-        );
-        Self::apply_column_filters(
-            &mut list,
-            &self.column_filters,
-            Tab::Branches,
-            Self::branch_filter_values,
-        );
-        list
-    }
-
-    pub fn environment_filter_values(
-        item: &crate::domain::deployments::Environment,
-        col: &str,
-    ) -> Vec<String> {
-        match col {
-            "Name" => vec![item.name.clone()],
-            "State" => vec![item.state.clone()],
-            "Deployment Status" => item
-                .last_deployment
-                .as_ref()
-                .map(|d| vec![d.status.clone()])
-                .unwrap_or_default(),
-            "URL" => item.external_url.clone().into_iter().collect(),
-            _ => vec![],
-        }
-    }
-
-    pub fn filter_environments_list<'a>(
-        items: &'a [crate::domain::deployments::Environment],
-        query: &str,
-        enabled_cols: &std::collections::HashSet<String>,
-    ) -> Vec<&'a crate::domain::deployments::Environment> {
-        if query.trim().is_empty() {
-            return items.iter().collect();
-        }
-        let matcher = &*FUZZY_MATCHER;
-        let q = query.trim();
-        items
-            .iter()
-            .filter(|item| {
-                let mut matches = false;
-                let mut check_match = |text: &str| {
-                    if matcher.fuzzy_match(text, q).is_some() {
-                        matches = true;
-                    }
-                };
-                if enabled_cols.contains("Name") {
-                    check_match(&item.name);
-                }
-                if enabled_cols.contains("State") {
-                    check_match(&item.state);
-                }
-                matches
-            })
-            .collect()
-    }
-
-    pub fn filtered_environments_list<'a>(
-        items: &'a [crate::domain::deployments::Environment],
-        query: &str,
-        enabled_columns: &std::collections::HashMap<Tab, std::collections::HashSet<String>>,
-        ascending: bool,
-        group_by_column: &Option<String>,
-    ) -> Vec<&'a crate::domain::deployments::Environment> {
-        let default_set = std::collections::HashSet::new();
-        let enabled_cols = enabled_columns
-            .get(&Tab::Environments)
-            .unwrap_or(&default_set);
-        let mut list = Self::filter_environments_list(items, query, enabled_cols);
-        if let Some(col) = group_by_column {
-            Self::sort_by_column_values(&mut list, col, ascending, Self::environment_filter_values);
-        }
-        list
-    }
-
-    pub fn filtered_environments(&self) -> Vec<&crate::domain::deployments::Environment> {
-        let mut list = Self::filtered_environments_list(
-            &self.environments.items,
-            &self.search_query,
-            &self.enabled_columns,
-            self.group_ascending
-                .get(&Tab::Environments)
-                .copied()
-                .unwrap_or(true),
-            self.group_by_column
-                .get(&Tab::Environments)
-                .unwrap_or(&None),
-        );
-        Self::apply_column_filters(
-            &mut list,
-            &self.column_filters,
-            Tab::Environments,
-            Self::environment_filter_values,
-        );
-        list
-    }
-
     /// Drops the fetched deployments once their environment is no longer the
     /// highlighted row of the Environments tab. Selection moves come from many
     /// places (keys, mouse, search, column filters, refetches, tab switches),
     /// so the event loop reconciles here once per frame instead.
     pub fn discard_stale_deployments(&mut self) {
+        self.sync_list_views();
         let is_stale = self
             .environment_deployments
             .as_ref()
@@ -7235,9 +6938,7 @@ impl App {
         self.active_tab == Tab::Environments
             && self
                 .environments
-                .state
-                .selected()
-                .and_then(|idx| self.filtered_environments().get(idx).copied())
+                .cursor_row()
                 .is_some_and(|env| env.name == name)
     }
 
@@ -7379,59 +7080,15 @@ impl App {
             if selected.is_empty() {
                 continue;
             }
-            let is_text = matches!(
-                col.as_str(),
-                "Project" | "Title" | "Name" | "Ref" | "Tag" | "Release Name"
-            );
-            list.retain(|item| {
-                let vals = get_values(item, col);
-                if is_text {
-                    vals.iter().any(|v| {
-                        selected.contains(v)
-                            || selected.iter().any(|s| {
-                                let norm_v = v.to_lowercase();
-                                let norm_s = s.to_lowercase();
-                                norm_v == norm_s
-                                    || norm_v.contains(&norm_s)
-                                    || norm_s.contains(&norm_v)
-                            })
-                    })
-                } else {
-                    vals.iter().any(|v| {
-                        let norm_v = Self::normalize_filter_value(v);
-                        selected.contains(v)
-                            || selected.contains(norm_v)
-                            || selected.iter().any(|s| {
-                                let norm_s = Self::normalize_filter_value(s);
-                                norm_s == v.as_str() || norm_s == norm_v
-                            })
-                    })
-                }
-            });
-        }
-    }
-
-    /// Order `list` for group-by on `col`, keyed by the first value
-    /// `get_values` reports (the cell text). Rows with no value key on `""`
-    /// instead of the placeholder their cell shows, so ascending puts them
-    /// ahead of every other text value and descending puts them behind.
-    fn sort_by_column_values<T>(
-        list: &mut [&T],
-        col: &str,
-        ascending: bool,
-        get_values: impl Fn(&T, &str) -> Vec<String>,
-    ) {
-        let key =
-            |item: &&T| GroupKey::new(get_values(item, col).into_iter().next().unwrap_or_default());
-        if ascending {
-            list.sort_by_cached_key(key);
-        } else {
-            list.sort_by_cached_key(|item| std::cmp::Reverse(key(item)));
+            list.retain(|item| column_filter_matches(col, &get_values(item, col), selected));
         }
     }
 
     pub fn collect_unique_column_values(&self, tab: Tab, col: &str) -> Vec<String> {
         use std::collections::BTreeSet;
+        if let Some(list) = self.list_navigation(tab) {
+            return list.distinct_filter_values(col);
+        }
         let mut values: BTreeSet<String> = BTreeSet::new();
         // Rows listed for one state cannot offer the others, so every state
         // stays selectable while the server narrows the list.
@@ -7493,20 +7150,6 @@ impl App {
                     }
                 }
             }
-            Tab::Runners => {
-                for item in &self.runners.items {
-                    for v in Self::runner_filter_values(item, col) {
-                        values.insert(v);
-                    }
-                }
-            }
-            Tab::Releases => {
-                for item in &self.releases.items {
-                    for v in Self::release_filter_values(item, col) {
-                        values.insert(v);
-                    }
-                }
-            }
             Tab::Todos => {
                 for item in &self.todos.items {
                     for v in Self::todo_filter_values(item, col) {
@@ -7521,23 +7164,7 @@ impl App {
                     }
                 }
             }
-            Tab::Branches => {
-                for item in &self.branches.items {
-                    // Offer the displayed value only: the trailing entries of
-                    // `branch_filter_values` are back-compat aliases.
-                    if let Some(v) = Self::branch_filter_values(item, col).into_iter().next() {
-                        values.insert(v);
-                    }
-                }
-            }
-            Tab::Environments => {
-                for item in &self.environments.items {
-                    for v in Self::environment_filter_values(item, col) {
-                        values.insert(v);
-                    }
-                }
-            }
-            Tab::Terminal => {}
+            Tab::Runners | Tab::Releases | Tab::Branches | Tab::Environments | Tab::Terminal => {}
         }
         values.into_iter().collect()
     }
@@ -7755,10 +7382,9 @@ impl App {
                 map
             }
             Tab::Releases => {
-                let items = self.filtered_releases();
                 let mut map: std::collections::BTreeMap<String, Vec<usize>> =
                     std::collections::BTreeMap::new();
-                for (idx, r) in items.iter().enumerate() {
+                for (idx, r) in self.releases.view_rows().enumerate() {
                     let key = match col.as_str() {
                         "Date" => {
                             if r.released_at.len() >= 10 {
@@ -7820,6 +7446,7 @@ impl App {
     }
 
     pub fn update_filter_selection(&mut self) {
+        self.sync_list_views();
         match self.active_tab {
             Tab::Issues => {
                 let len = self.filtered_issues().len();
@@ -7871,42 +7498,6 @@ impl App {
                         }
                         None => {
                             self.pipelines.state.select(Some(0));
-                        }
-                    }
-                }
-            }
-            Tab::Runners => {
-                let len = self.filtered_runners().len();
-                let sel = self.runners.state.selected();
-                if len == 0 {
-                    self.runners.state.select(None);
-                } else {
-                    match sel {
-                        Some(idx) => {
-                            if idx >= len {
-                                self.runners.state.select(Some(len - 1));
-                            }
-                        }
-                        None => {
-                            self.runners.state.select(Some(0));
-                        }
-                    }
-                }
-            }
-            Tab::Releases => {
-                let len = self.filtered_releases().len();
-                let sel = self.releases.state.selected();
-                if len == 0 {
-                    self.releases.state.select(None);
-                } else {
-                    match sel {
-                        Some(idx) => {
-                            if idx >= len {
-                                self.releases.state.select(Some(len - 1));
-                            }
-                        }
-                        None => {
-                            self.releases.state.select(Some(0));
                         }
                     }
                 }
@@ -7965,43 +7556,7 @@ impl App {
                     }
                 }
             }
-            Tab::Branches => {
-                let len = self.filtered_branches().len();
-                let sel = self.branches.state.selected();
-                if len == 0 {
-                    self.branches.state.select(None);
-                } else {
-                    match sel {
-                        Some(idx) => {
-                            if idx >= len {
-                                self.branches.state.select(Some(len - 1));
-                            }
-                        }
-                        None => {
-                            self.branches.state.select(Some(0));
-                        }
-                    }
-                }
-            }
-            Tab::Environments => {
-                let len = self.filtered_environments().len();
-                let sel = self.environments.state.selected();
-                if len == 0 {
-                    self.environments.state.select(None);
-                } else {
-                    match sel {
-                        Some(idx) => {
-                            if idx >= len {
-                                self.environments.state.select(Some(len - 1));
-                            }
-                        }
-                        None => {
-                            self.environments.state.select(Some(0));
-                        }
-                    }
-                }
-            }
-            Tab::Terminal => {}
+            Tab::Runners | Tab::Releases | Tab::Branches | Tab::Environments | Tab::Terminal => {}
         }
         self.rebuild_group_map();
     }
@@ -8160,12 +7715,17 @@ mod tests {
         }
     }
 
-    fn runner_ids(list: &[&crate::domain::runners::Runner]) -> Vec<u64> {
-        list.iter().map(|r| r.id).collect()
+    fn runner_ids<'a>(
+        list: impl IntoIterator<Item = &'a crate::domain::runners::Runner>,
+    ) -> Vec<u64> {
+        list.into_iter().map(|r| r.id).collect()
     }
 
     #[test]
     fn runner_search_ranks_the_closer_match_first() {
+        use crate::ui::list_tab::runners::RunnerColumn;
+        use crate::ui::list_tab::{ListTab, ViewInputs};
+
         let runners = vec![
             runner(
                 1,
@@ -8182,31 +7742,55 @@ mod tests {
             .map(String::from)
             .collect();
 
-        let found = App::filter_runners_list(&runners, "docker", &enabled);
+        let mut list = ListTab::<RunnerColumn>::default();
+        list.set_items(runners);
+        list.refresh(ViewInputs {
+            query: "docker",
+            enabled_columns: Some(&enabled),
+            column_filters: None,
+            sort: None,
+        });
 
-        assert_eq!(runner_ids(&found), vec![2, 1]);
+        assert_eq!(runner_ids(list.view_rows()), vec![2, 1]);
     }
 
     #[test]
     fn runner_search_matches_the_displayed_active_text() {
+        use crate::ui::list_tab::runners::RunnerColumn;
+        use crate::ui::list_tab::{ListTab, ViewInputs};
+
         let runners = vec![
             runner(1, "a", "online", true),
             runner(2, "b", "paused", false),
         ];
         let enabled: std::collections::HashSet<String> = ["Active".to_string()].into();
 
-        assert_eq!(
-            runner_ids(&App::filter_runners_list(&runners, "YES", &enabled)),
-            vec![1]
-        );
-        assert_eq!(
-            runner_ids(&App::filter_runners_list(&runners, "NO", &enabled)),
-            vec![2]
-        );
+        let mut list1 = ListTab::<RunnerColumn>::default();
+        list1.set_items(runners.clone());
+        list1.refresh(ViewInputs {
+            query: "YES",
+            enabled_columns: Some(&enabled),
+            column_filters: None,
+            sort: None,
+        });
+        assert_eq!(runner_ids(list1.view_rows()), vec![1]);
+
+        let mut list2 = ListTab::<RunnerColumn>::default();
+        list2.set_items(runners);
+        list2.refresh(ViewInputs {
+            query: "NO",
+            enabled_columns: Some(&enabled),
+            column_filters: None,
+            sort: None,
+        });
+        assert_eq!(runner_ids(list2.view_rows()), vec![2]);
     }
 
     #[test]
     fn runners_group_by_status_orders_by_displayed_status() {
+        use crate::ui::list_tab::runners::RunnerColumn;
+        use crate::ui::list_tab::{ListTab, ViewInputs};
+
         let runners = vec![
             runner(1, "a", "paused", false),
             runner(2, "b", "online", true),
@@ -8214,38 +7798,62 @@ mod tests {
             runner(4, "d", "online", true),
             runner(5, "e", "never_contacted", false),
         ];
-        let group_by = Some("Status".to_string());
-        let enabled = std::collections::HashMap::new();
 
-        let ascending = App::filtered_runners_list(&runners, "", &enabled, true, &group_by);
-        let descending = App::filtered_runners_list(&runners, "", &enabled, false, &group_by);
+        let mut list_asc = ListTab::<RunnerColumn>::default();
+        list_asc.set_items(runners.clone());
+        list_asc.refresh(ViewInputs {
+            query: "",
+            enabled_columns: None,
+            column_filters: None,
+            sort: Some(("Status", true)),
+        });
 
-        assert_eq!(runner_ids(&ascending), vec![3, 2, 4, 1, 5]);
-        assert_eq!(runner_ids(&descending), vec![5, 1, 2, 4, 3]);
+        let mut list_desc = ListTab::<RunnerColumn>::default();
+        list_desc.set_items(runners);
+        list_desc.refresh(ViewInputs {
+            query: "",
+            enabled_columns: None,
+            column_filters: None,
+            sort: Some(("Status", false)),
+        });
+
+        assert_eq!(runner_ids(list_asc.view_rows()), vec![3, 2, 4, 1, 5]);
+        assert_eq!(runner_ids(list_desc.view_rows()), vec![5, 1, 2, 4, 3]);
     }
 
     #[test]
     fn runners_group_by_id_sorts_numerically() {
+        use crate::ui::list_tab::runners::RunnerColumn;
+        use crate::ui::list_tab::{ListTab, ViewInputs};
+
         let runners = vec![
             runner(10, "a", "online", true),
             runner(9, "b", "online", true),
         ];
-        let enabled = std::collections::HashMap::new();
 
-        let list =
-            App::filtered_runners_list(&runners, "", &enabled, true, &Some("ID".to_string()));
+        let mut list = ListTab::<RunnerColumn>::default();
+        list.set_items(runners);
+        list.refresh(ViewInputs {
+            query: "",
+            enabled_columns: None,
+            column_filters: None,
+            sort: Some(("ID", true)),
+        });
 
-        assert_eq!(runner_ids(&list), vec![9, 10]);
+        assert_eq!(runner_ids(list.view_rows()), vec![9, 10]);
     }
 
     #[test]
     fn runner_active_filter_values_match_the_yes_no_cell() {
+        use crate::ui::list_tab::ColumnDef;
+        use crate::ui::list_tab::runners::RunnerColumn;
+
         assert_eq!(
-            App::runner_filter_values(&runner(1, "a", "online", true), "Active"),
+            RunnerColumn::Active.filter_values(&runner(1, "a", "online", true)),
             vec!["YES".to_string()]
         );
         assert_eq!(
-            App::runner_filter_values(&runner(2, "b", "paused", false), "Active"),
+            RunnerColumn::Active.filter_values(&runner(2, "b", "paused", false)),
             vec!["NO".to_string()]
         );
     }
@@ -8328,47 +7936,60 @@ mod tests {
         )])
     }
 
+    fn release_tags(app: &mut App) -> Vec<String> {
+        app.sync_list_views();
+        app.releases
+            .view_rows()
+            .map(|r| r.tag_name.clone())
+            .collect()
+    }
+
+    fn branch_names(app: &mut App) -> Vec<String> {
+        app.sync_list_views();
+        app.branches.view_rows().map(|b| b.name.clone()).collect()
+    }
+
     #[test]
     fn release_notes_column_searches_groups_and_filters_by_notes_text() {
-        let mut app = App::default();
-        app.releases.items = vec![
+        let mut app = App {
+            active_tab: Tab::Releases,
+            ..App::default()
+        };
+        app.releases.set_items(vec![
             release_fixture("v1", "Zeta rollback"),
             release_fixture("v2", "Alpha hotfix"),
-        ];
+        ]);
         app.enabled_columns.insert(
             Tab::Releases,
             std::collections::HashSet::from(["Release Notes".to_string()]),
         );
-        let tags = |list: Vec<&crate::domain::releases::Release>| {
-            list.iter().map(|r| r.tag_name.clone()).collect::<Vec<_>>()
-        };
 
         app.search_query = "hotfix".to_string();
-        assert_eq!(tags(app.filtered_releases()), vec!["v2"]);
+        assert_eq!(release_tags(&mut app), vec!["v2"]);
 
         app.search_query.clear();
         app.group_by_column
             .insert(Tab::Releases, Some("Release Notes".to_string()));
-        assert_eq!(tags(app.filtered_releases()), vec!["v2", "v1"]);
+        assert_eq!(release_tags(&mut app), vec!["v2", "v1"]);
 
         assert_eq!(
             app.collect_unique_column_values(Tab::Releases, "Release Notes"),
             vec!["Alpha hotfix", "Zeta rollback"]
         );
         app.column_filters = column_filter(Tab::Releases, "Release Notes", "Zeta rollback");
-        assert_eq!(tags(app.filtered_releases()), vec!["v1"]);
+        assert_eq!(release_tags(&mut app), vec!["v1"]);
     }
 
     #[test]
     fn branch_flag_filters_offer_and_match_the_cell_text() {
-        let mut app = App::default();
-        app.branches.items = vec![
+        let mut app = App {
+            active_tab: Tab::Branches,
+            ..App::default()
+        };
+        app.branches.set_items(vec![
             branch_fixture("main", true, true),
             branch_fixture("feature", false, false),
-        ];
-        let names = |list: Vec<&crate::domain::branches::Branch>| {
-            list.iter().map(|b| b.name.clone()).collect::<Vec<_>>()
-        };
+        ]);
 
         assert_eq!(
             app.collect_unique_column_values(Tab::Branches, "Default"),
@@ -8380,108 +8001,108 @@ mod tests {
         );
 
         app.column_filters = column_filter(Tab::Branches, "Default", "YES");
-        assert_eq!(names(app.filtered_branches()), vec!["main"]);
+        assert_eq!(branch_names(&mut app), vec!["main"]);
         app.column_filters = column_filter(Tab::Branches, "Protected", "NO");
-        assert_eq!(names(app.filtered_branches()), vec!["feature"]);
+        assert_eq!(branch_names(&mut app), vec!["feature"]);
     }
 
     #[test]
     fn branch_flag_filters_saved_as_true_false_still_match() {
-        let mut app = App::default();
-        app.branches.items = vec![
+        let mut app = App {
+            active_tab: Tab::Branches,
+            ..App::default()
+        };
+        app.branches.set_items(vec![
             branch_fixture("main", true, true),
             branch_fixture("feature", false, false),
-        ];
+        ]);
         app.column_filters = column_filter(Tab::Branches, "Protected", "false");
-        let names: Vec<_> = app
-            .filtered_branches()
-            .iter()
-            .map(|b| b.name.clone())
-            .collect();
-        assert_eq!(names, vec!["feature"]);
+        assert_eq!(branch_names(&mut app), vec!["feature"]);
     }
 
     #[test]
     fn group_by_orders_runners_by_cell_text_with_numeric_ids() {
-        let mut app = App::default();
-        app.runners.items = serde_json::from_value(serde_json::json!([
-            {"id": 10, "description": "b", "status": "paused", "active": true},
-            {"id": 9, "description": "c", "status": "online", "active": true},
-            {"id": 100, "description": "a", "status": "offline", "active": false},
-        ]))
-        .unwrap();
-        let ids = |app: &App| {
-            app.filtered_runners()
-                .iter()
-                .map(|r| r.id)
-                .collect::<Vec<_>>()
+        let mut app = App {
+            active_tab: Tab::Runners,
+            ..App::default()
+        };
+        app.runners.set_items(
+            serde_json::from_value(serde_json::json!([
+                {"id": 10, "description": "b", "status": "paused", "active": true},
+                {"id": 9, "description": "c", "status": "online", "active": true},
+                {"id": 100, "description": "a", "status": "offline", "active": false},
+            ]))
+            .unwrap(),
+        );
+        let ids = |app: &mut App| {
+            app.sync_list_views();
+            app.runners.view_rows().map(|r| r.id).collect::<Vec<_>>()
         };
 
         app.group_by_column
             .insert(Tab::Runners, Some("ID".to_string()));
-        assert_eq!(ids(&app), vec![9, 10, 100]);
+        assert_eq!(ids(&mut app), vec![9, 10, 100]);
 
         app.group_ascending.insert(Tab::Runners, false);
-        assert_eq!(ids(&app), vec![100, 10, 9]);
+        assert_eq!(ids(&mut app), vec![100, 10, 9]);
 
         app.group_ascending.insert(Tab::Runners, true);
         app.group_by_column
             .insert(Tab::Runners, Some("Status".to_string()));
-        assert_eq!(ids(&app), vec![100, 9, 10]);
+        assert_eq!(ids(&mut app), vec![100, 9, 10]);
     }
 
     #[test]
     fn group_by_orders_branches_by_cell_text() {
-        let mut app = App::default();
-        app.branches.items = vec![
+        let mut app = App {
+            active_tab: Tab::Branches,
+            ..App::default()
+        };
+        app.branches.set_items(vec![
             branch_fixture("feature", false, true),
             branch_fixture("main", true, false),
             branch_fixture("docs", false, false),
-        ];
+        ]);
         app.group_by_column
             .insert(Tab::Branches, Some("Default".to_string()));
         app.group_ascending.insert(Tab::Branches, false);
-        let names: Vec<_> = app
-            .filtered_branches()
-            .iter()
-            .map(|b| b.name.clone())
-            .collect();
-        assert_eq!(names, vec!["main", "feature", "docs"]);
+        assert_eq!(branch_names(&mut app), vec!["main", "feature", "docs"]);
 
         app.group_ascending.insert(Tab::Branches, true);
         app.group_by_column
             .insert(Tab::Branches, Some("Name".to_string()));
-        let names: Vec<_> = app
-            .filtered_branches()
-            .iter()
-            .map(|b| b.name.clone())
-            .collect();
-        assert_eq!(names, vec!["docs", "feature", "main"]);
+        assert_eq!(branch_names(&mut app), vec!["docs", "feature", "main"]);
     }
 
     #[test]
     fn group_by_orders_environments_by_cell_text() {
-        let mut app = App::default();
-        app.environments.items = serde_json::from_value(serde_json::json!([
-            {"id": 1, "name": "staging", "state": "stopped", "external_url": "https://b.example"},
-            {"id": 2, "name": "production", "state": "available", "external_url": "https://a.example"},
-            {"id": 3, "name": "review", "state": "available"},
-        ]))
-        .unwrap();
-        let names = |app: &App| {
-            app.filtered_environments()
-                .iter()
+        let mut app = App {
+            active_tab: Tab::Environments,
+            ..App::default()
+        };
+        app.environments.set_items(
+            serde_json::from_value(serde_json::json!([
+                {"id": 1, "name": "staging", "state": "stopped", "external_url": "https://b.example"},
+                {"id": 2, "name": "production", "state": "available", "external_url": "https://a.example"},
+                {"id": 3, "name": "review", "state": "available"},
+            ]))
+            .unwrap(),
+        );
+        let names = |app: &mut App| {
+            app.sync_list_views();
+            app.environments
+                .view_rows()
                 .map(|e| e.name.clone())
                 .collect::<Vec<_>>()
         };
 
         app.group_by_column
             .insert(Tab::Environments, Some("State".to_string()));
-        assert_eq!(names(&app), vec!["production", "review", "staging"]);
+        assert_eq!(names(&mut app), vec!["production", "review", "staging"]);
 
         app.group_by_column
             .insert(Tab::Environments, Some("URL".to_string()));
-        assert_eq!(names(&app), vec!["review", "production", "staging"]);
+        assert_eq!(names(&mut app), vec!["review", "production", "staging"]);
     }
 
     #[test]
@@ -8894,18 +8515,20 @@ mod tests {
         let copied = std::rc::Rc::new(std::cell::RefCell::new(None));
         let mut app = App {
             clipboard: Box::new(RecordingClipboard(copied.clone())),
+            active_tab: Tab::Branches,
             ..App::default()
         };
 
-        app.branches.items = vec![crate::domain::branches::Branch {
-            name: "feature/new-api".to_string(),
-            default: false,
-            protected: true,
-            can_push: true,
-            commit_sha: "abc1234".to_string(),
-            web_url: "https://gitlab.com/acme/project/-/tree/feature/new-api".to_string(),
-        }];
-        app.branches.state.select(Some(0));
+        app.branches
+            .set_items(vec![crate::domain::branches::Branch {
+                name: "feature/new-api".to_string(),
+                default: false,
+                protected: true,
+                can_push: true,
+                commit_sha: "abc1234".to_string(),
+                web_url: "https://gitlab.com/acme/project/-/tree/feature/new-api".to_string(),
+            }]);
+        app.sync_list_views();
 
         assert_eq!(
             app.selected_branch_name().as_deref(),
@@ -8913,6 +8536,38 @@ mod tests {
         );
         app.copy_selected_branch_name().unwrap();
         assert_eq!(copied.borrow().as_deref(), Some("feature/new-api"));
+    }
+
+    #[test]
+    fn search_typed_on_another_tab_keeps_the_hidden_branch_selected() {
+        let branch = |name: &str| crate::domain::branches::Branch {
+            name: name.to_string(),
+            default: false,
+            protected: false,
+            can_push: true,
+            commit_sha: "abc1234".to_string(),
+            web_url: String::new(),
+        };
+        let mut app = App {
+            active_tab: Tab::Branches,
+            ..App::default()
+        };
+        app.branches
+            .set_items(vec![branch("main"), branch("release/2.0"), branch("fix/b")]);
+        if let Some(list) = app.list_navigation_mut(Tab::Branches) {
+            list.next();
+        }
+        assert_eq!(app.selected_branch_name().as_deref(), Some("release/2.0"));
+
+        app.active_tab = Tab::Issues;
+        app.search_query = "fix".to_string();
+        app.sync_list_views();
+        app.search_query.clear();
+        app.sync_list_views();
+        app.active_tab = Tab::Branches;
+        app.sync_list_views();
+
+        assert_eq!(app.selected_branch_name().as_deref(), Some("release/2.0"));
     }
 
     #[test]
@@ -9413,8 +9068,10 @@ mod tests {
 
     #[test]
     fn pipeline_project_prefers_the_listed_row_over_an_older_jobs_tab_project() {
-        let mut app = App::default();
-        app.scope = crate::scope::Scope::Group("acme".to_string());
+        let mut app = App {
+            scope: crate::scope::Scope::Group("acme".to_string()),
+            ..Default::default()
+        };
         let mut in_project_b = nav_pipe(7);
         in_project_b.project_path = "acme/project-b".to_string();
         app.pipelines.items = vec![nav_pipe(5), in_project_b];
@@ -11836,8 +11493,10 @@ index 123456..789012 100644
         }
 
         let copied = std::rc::Rc::new(std::cell::RefCell::new(None));
-        let mut app = App::default();
-        app.clipboard = Box::new(RecordingClipboard(copied.clone()));
+        let app = App {
+            clipboard: Box::new(RecordingClipboard(copied.clone())),
+            ..Default::default()
+        };
         (app, copied)
     }
 
@@ -12961,16 +12620,18 @@ index 123456..789012 100644
     /// An app on the Todos tab holding todo `1` (unread), `2` (unread) and
     /// `3` (already read), with the highlight on todo `2`.
     fn app_with_todos(kind: BackendKind, shows_read: bool) -> App {
-        let mut app = App::default();
-        app.gitlab_client = Some(crate::domain::client::GitlabClient {
-            is_github: kind.is_github(),
-            backend: crate::backend::create_backend(kind.is_github()),
-            tx: None,
-            page_size: 30,
-            api_per_page: 30,
-            show_read_notifications: shows_read,
-        });
-        app.active_tab = Tab::Todos;
+        let mut app = App {
+            gitlab_client: Some(crate::domain::client::GitlabClient {
+                is_github: kind.is_github(),
+                backend: crate::backend::create_backend(kind.is_github()),
+                tx: None,
+                page_size: 30,
+                api_per_page: 30,
+                show_read_notifications: shows_read,
+            }),
+            active_tab: Tab::Todos,
+            ..Default::default()
+        };
         let read_state = crate::domain::notifications::read_state(kind);
         app.todos.items = serde_json::from_value(serde_json::json!([
             {"id": "1", "project_path": "acme/api", "title": "One", "target_type": "Issue",
@@ -13024,17 +12685,18 @@ index 123456..789012 100644
     }
 
     fn app_on(is_github: bool, scope: crate::scope::Scope) -> App {
-        let mut app = App::default();
-        app.scope = scope;
-        app.gitlab_client = Some(crate::domain::client::GitlabClient {
-            is_github,
-            backend: crate::backend::create_backend(is_github),
-            tx: None,
-            page_size: 100,
-            api_per_page: 100,
-            show_read_notifications: false,
-        });
-        app
+        App {
+            scope,
+            gitlab_client: Some(crate::domain::client::GitlabClient {
+                is_github,
+                backend: crate::backend::create_backend(is_github),
+                tx: None,
+                page_size: 100,
+                api_per_page: 100,
+                show_read_notifications: false,
+            }),
+            ..Default::default()
+        }
     }
 
     fn github_repo_app() -> App {
@@ -13183,8 +12845,10 @@ index 123456..789012 100644
 
     #[test]
     fn focusing_an_issue_in_a_project_skips_the_same_number_in_another_project() {
-        let mut app = App::default();
-        app.scope = crate::scope::Scope::Group("acme".to_string());
+        let mut app = App {
+            scope: crate::scope::Scope::Group("acme".to_string()),
+            ..Default::default()
+        };
         let mut web = issue_with_milestone(5, "opened", 1);
         web.project_path = "acme/web".to_string();
         let mut api = issue_with_milestone(5, "opened", 1);
@@ -13201,8 +12865,10 @@ index 123456..789012 100644
 
     #[test]
     fn rows_without_a_project_belong_to_the_repository_in_scope() {
-        let mut app = App::default();
-        app.scope = crate::scope::Scope::Repository("acme/api".to_string());
+        let app = App {
+            scope: crate::scope::Scope::Repository("acme/api".to_string()),
+            ..Default::default()
+        };
         assert!(app.is_listed_in("", Some("ACME/api")));
         assert!(!app.is_listed_in("", Some("acme/web")));
         assert!(app.is_listed_in("acme/web", Some("acme/web")));
@@ -13215,14 +12881,16 @@ index 123456..789012 100644
         app.column_filters.clear();
         app.enabled_columns
             .insert(Tab::Environments, HashSet::from(["Name".to_string()]));
-        app.environments.items = serde_json::from_str(
-            r#"[
+        app.environments.set_items(
+            serde_json::from_str(
+                r#"[
                 {"id": 1, "name": "production", "state": "available"},
                 {"id": 2, "name": "staging", "state": "available"}
             ]"#,
-        )
-        .expect("environment fixture parses");
-        app.environments.state.select(Some(0));
+            )
+            .expect("environment fixture parses"),
+        );
+        app.sync_list_views();
         let deployments = serde_json::from_str(
             r#"[{
                 "id": 10, "iid": 1, "ref_name": "main", "tag": false, "sha": "abc123",
@@ -13254,7 +12922,9 @@ index 123456..789012 100644
     #[test]
     fn deployments_are_discarded_when_another_environment_is_selected() {
         let mut app = app_showing_deployments_for("production");
-        app.environments.state.select(Some(1));
+        app.list_navigation_mut(Tab::Environments)
+            .expect("environments is a list tab")
+            .next();
         app.discard_stale_deployments();
         assert_eq!(shown_deployments_environment(&app), None);
     }
@@ -13264,7 +12934,10 @@ index 123456..789012 100644
         let mut app = app_showing_deployments_for("production");
         app.search_query = "staging".to_string();
         app.discard_stale_deployments();
-        assert_eq!(app.environments.state.selected(), Some(0));
+        assert_eq!(
+            app.environments.cursor_row().map(|env| env.name.as_str()),
+            Some("staging")
+        );
         assert_eq!(shown_deployments_environment(&app), None);
     }
 

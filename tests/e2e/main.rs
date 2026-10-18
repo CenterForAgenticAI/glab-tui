@@ -10,6 +10,7 @@ mod group_scope_actions;
 mod job_trace;
 mod keybindings;
 mod layout;
+mod list_tab;
 mod pagination;
 mod pr_diff_fallback;
 mod review_cli;

@@ -1052,9 +1052,9 @@ pub fn apply_field_text_change(
             }
         }
         "runner_description" => {
-            if let Some(runner) = app.runners.items.iter_mut().find(|r| r.id == iid) {
+            app.runners.update(&iid, |runner| {
                 runner.description = Some(value.clone());
-            }
+            });
             let Some(client) = app.gitlab_client.clone() else {
                 return;
             };
@@ -1513,16 +1513,21 @@ pub fn rebuild_edit_menu(app: &mut App, entity_type: &str, entity_iid: u64) {
     }
 }
 
-pub fn open_release_edit_menu(app: &mut App, release: &crate::domain::releases::Release) {
+/// The edit menu for `release`. Releases have no numeric id, so the menu's
+/// `entity_iid` stays 0 and submitting resolves the release by its
+/// read-only Tag field.
+pub fn release_edit_menu(
+    release: &crate::domain::releases::Release,
+    project: &str,
+) -> crate::app::EditMenu {
     let mut doc = build_release_document(release);
     doc.fields.push(crate::app::Field::text(
         "Release Notes",
         release.description.clone().unwrap_or_default(),
     ));
-
-    app.open_edit_menu(crate::app::EditMenu {
+    crate::app::EditMenu {
         title: format!("Edit Release {}", release.tag_name),
-        entity_project: release.project_or(&app.scope).to_string(),
+        entity_project: project.to_string(),
         fields: doc.fields,
         initial_fields: std::collections::HashMap::new(),
         selected_idx: 0,
@@ -1537,7 +1542,12 @@ pub fn open_release_edit_menu(app: &mut App, release: &crate::domain::releases::
         cursor_pos: 0,
         editing: false,
         desc_scroll: 0,
-    });
+    }
+}
+
+pub fn open_release_edit_menu(app: &mut App, release: &crate::domain::releases::Release) {
+    let menu = release_edit_menu(release, release.project_or(&app.scope));
+    app.open_edit_menu(menu);
 }
 
 #[cfg(test)]
@@ -2088,9 +2098,10 @@ mod tests {
         };
         let mut app = App::default();
         app.scope = crate::scope::Scope::Group("group".to_string());
-        app.releases.items = vec![release("group/a"), release("group/b")];
+        app.releases
+            .set_items(vec![release("group/a"), release("group/b")]);
 
-        let selected = app.releases.items[1].clone();
+        let selected = app.releases.items()[1].clone();
         open_release_edit_menu(&mut app, &selected);
 
         let menu = app.edit_menu.as_ref().expect("release edit form opens");
