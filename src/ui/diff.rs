@@ -1,4 +1,5 @@
 use crate::config::{ICONS, THEME};
+use crate::syntax::{LineHighlighter, ScopeKinds, styled_tokens, syntax_for_path};
 use crate::utils::format::sanitize_untrusted;
 use ratatui::{
     layout::{Constraint, Direction, Layout, Rect},
@@ -37,6 +38,8 @@ pub(crate) fn format_comment_with_suggestions(
     let mut result_lines = Vec::new();
     let mut in_suggestion = false;
     let mut is_first = true;
+    let mut scope_kinds = ScopeKinds::default();
+    let mut suggestion_highlighter: Option<LineHighlighter> = None;
     let continuation_prefix = " ".repeat(Span::raw(prefix).width());
     let (suggestion_start, suggestion_end) = {
         let icons = ICONS.read().unwrap();
@@ -94,6 +97,7 @@ pub(crate) fn format_comment_with_suggestions(
 
         if is_suggestion_start {
             in_suggestion = true;
+            suggestion_highlighter = syntax_for_path(file_path).map(LineHighlighter::new);
             result_lines.push((
                 current_prefix.clone(),
                 prefix_style,
@@ -120,15 +124,14 @@ pub(crate) fn format_comment_with_suggestions(
                     "│ - ".to_string(),
                 )];
 
-                let clean_content = crate::app::strip_diff_marker(&orig.content).to_string();
-
-                if let Some(ref highlighted) = orig.syntax_highlighted {
-                    for (span_style, text) in highlighted {
-                        let merged = span_style.fg(span_style.fg.unwrap_or(code_fg)).bg(code_bg);
-                        spans.push((merged, text.clone()));
-                    }
-                } else {
-                    spans.push((Style::default().fg(code_fg).bg(code_bg), clean_content));
+                match orig.syntax_spans(&theme) {
+                    Some(highlighted) => spans.extend(
+                        highlighted.map(|(style, text)| (style.bg(code_bg), text.to_string())),
+                    ),
+                    None => spans.push((
+                        Style::default().fg(code_fg).bg(code_bg),
+                        orig.code().to_string(),
+                    )),
                 }
 
                 result_lines.push((continuation_prefix.clone(), prefix_style, spans));
@@ -160,18 +163,19 @@ pub(crate) fn format_comment_with_suggestions(
                 "│ + ".to_string(),
             )];
 
-            let highlighted = crate::app::highlight_code(file_path, body_line, None);
+            let highlighted = suggestion_highlighter
+                .as_mut()
+                .and_then(|h| h.highlight(body_line, &mut scope_kinds));
 
-            if let Some(ref hl) = highlighted {
-                for (span_style, text) in hl {
-                    let merged = span_style.fg(span_style.fg.unwrap_or(code_fg)).bg(code_bg);
-                    spans.push((merged, text.clone()));
-                }
-            } else {
-                spans.push((
+            match highlighted {
+                Some(tokens) => spans.extend(
+                    styled_tokens(&tokens, body_line, &theme)
+                        .map(|(style, text)| (style.bg(code_bg), text.to_string())),
+                ),
+                None => spans.push((
                     Style::default().fg(code_fg).bg(code_bg),
                     body_line.to_string(),
-                ));
+                )),
             }
 
             result_lines.push((current_prefix, prefix_style, spans));
