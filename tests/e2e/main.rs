@@ -18,6 +18,7 @@ mod runners;
 mod scenarios;
 mod secondary_tabs;
 mod stacked_prs;
+mod state_filter;
 mod tabs;
 mod todos;
 mod workspace;

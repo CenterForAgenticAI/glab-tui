@@ -1135,6 +1135,7 @@ pub async fn handle_active_tab_key(
                                 crate::fetch::spawn_refresh_active_tab(
                                     client,
                                     &app.scope,
+                                    app.requested_state_queries(),
                                     crate::app::Tab::Pipelines,
                                     app.scoped_sender(tx.clone()),
                                 );
@@ -1475,6 +1476,7 @@ pub async fn handle_active_tab_key(
                                 let scope = app.scope.clone();
                                 let tx = app.scoped_sender(tx.clone());
                                 let active_tab = app.active_tab;
+                                let states = app.requested_state_queries();
                                 let pipe_ids: Vec<u64> = if app.selected_pipelines.is_empty() {
                                     vec![pipe_id]
                                 } else {
@@ -1495,7 +1497,13 @@ pub async fn handle_active_tab_key(
                                     )
                                     .await;
                                     tokio::time::sleep(std::time::Duration::from_secs(1)).await;
-                                    spawn_refresh_active_tab(&client_clone, &scope, active_tab, tx);
+                                    spawn_refresh_active_tab(
+                                        &client_clone,
+                                        &scope,
+                                        states,
+                                        active_tab,
+                                        tx,
+                                    );
                                 });
                             }
                         }
@@ -2803,6 +2811,7 @@ pub async fn handle_active_tab_key(
                         spawn_refresh_active_tab(
                             client,
                             &app.scope,
+                            app.requested_state_queries(),
                             app.active_tab,
                             app.scoped_sender(tx.clone()),
                         );
@@ -2830,6 +2839,7 @@ pub async fn handle_active_tab_key(
                         spawn_refresh_active_tab(
                             client,
                             &app.scope,
+                            app.requested_state_queries(),
                             app.active_tab,
                             app.scoped_sender(tx.clone()),
                         );
@@ -3089,6 +3099,7 @@ pub(crate) fn jump_to_mr_tab(
         crate::fetch::spawn_refresh_active_tab(
             &client,
             &app.scope,
+            app.requested_state_queries(),
             crate::app::Tab::MergeRequests,
             app.scoped_sender(tx),
         );
@@ -3241,6 +3252,7 @@ pub(crate) fn jump_to_issue_tab(
         crate::fetch::spawn_refresh_active_tab(
             &client,
             &app.scope,
+            app.requested_state_queries(),
             crate::app::Tab::Issues,
             app.scoped_sender(tx),
         );

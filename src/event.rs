@@ -27,8 +27,16 @@ pub enum Event {
         scope: crate::scope::Scope,
         result: Result<crate::domain::client::GitlabClient, String>,
     },
-    IssuesFetched(Vec<crate::domain::issues::Issue>),
-    MrsFetched(Vec<crate::domain::mr::MergeRequest>),
+    /// Issues listed with the given state query.
+    IssuesFetched(
+        crate::domain::state_query::StateQuery,
+        Vec<crate::domain::issues::Issue>,
+    ),
+    /// MRs/PRs listed with the given state query.
+    MrsFetched(
+        crate::domain::state_query::StateQuery,
+        Vec<crate::domain::mr::MergeRequest>,
+    ),
     PipelinesFetched(Vec<crate::domain::pipelines::Pipeline>),
     RunnersFetched(Vec<crate::domain::runners::Runner>),
     ReleasesFetched(Vec<crate::domain::releases::Release>),
@@ -278,7 +286,10 @@ mod tests {
         let mut app = crate::app::App::default();
         let (tx, mut rx) = mpsc::unbounded_channel();
         app.scoped_sender(tx)
-            .send(Event::IssuesFetched(Vec::new()))
+            .send(Event::IssuesFetched(
+                crate::domain::state_query::StateQuery::All,
+                Vec::new(),
+            ))
             .expect("receiver is open");
 
         app.reset_on_scope_change();

@@ -703,8 +703,8 @@ fn sync_after_scope_change(app: &mut App, old_scope: &scope::Scope, events: &Eve
 
     let cache = crate::utils::cache::load_cache(app.scope.as_str());
     app.project_cache = cache.clone();
-    app.issues.items = cache.issues;
-    app.mrs.items = cache.mrs;
+    app.restore_cached_issues(cache.issues, cache.issues_state_query);
+    app.restore_cached_mrs(cache.mrs, cache.mrs_state_query);
     crate::fetch::derive_workflow(&mut app.mrs.items);
     app.pipelines.items = cache.pipelines;
     app.runners.items = cache.runners;
@@ -779,11 +779,13 @@ fn apply_client_ready(
     }
 
     let tx = app.scoped_sender(tx);
-    spawn_refresh_active_tab(&client, &app.scope, app.active_tab, tx.clone());
+    let states = app.requested_state_queries();
+    spawn_refresh_active_tab(&client, &app.scope, states, app.active_tab, tx.clone());
     if app.config.prefetch_tabs {
         spawn_refresh_all_tabs(
             &client,
             &app.scope,
+            states,
             app.active_tab,
             app.available_tabs(),
             app.loaded_tabs.clone(),
@@ -914,9 +916,9 @@ async fn main() -> Result<()> {
     // Load offline cache
     let cache = crate::utils::cache::load_cache(app.scope.as_str());
     app.project_cache = cache.clone();
-    app.issues.items = cache.issues;
+    app.restore_cached_issues(cache.issues, cache.issues_state_query);
     app.rebuild_milestone_progress_cache();
-    app.mrs.items = cache.mrs;
+    app.restore_cached_mrs(cache.mrs, cache.mrs_state_query);
     // workflow is #[serde(skip)] — cached rows arrive with it unset even
     // though the approval state it derives from was persisted and just
     // loaded above.
@@ -989,13 +991,20 @@ async fn main() -> Result<()> {
         if app.issues.items.is_empty() {
             app.start_loading_tab(app.active_tab);
         }
-        spawn_refresh_active_tab(&client, &app.scope, app.active_tab, tx.clone());
+        spawn_refresh_active_tab(
+            &client,
+            &app.scope,
+            app.requested_state_queries(),
+            app.active_tab,
+            tx.clone(),
+        );
         // If configured, queue background fetches for remaining enabled tabs
         // so a quick tab-switch lands on already-populated data.
         if app.config.prefetch_tabs {
             spawn_refresh_all_tabs(
                 &client,
                 &app.scope,
+                app.requested_state_queries(),
                 app.active_tab,
                 app.available_tabs(),
                 app.loaded_tabs.clone(),
@@ -1263,6 +1272,11 @@ async fn main() -> Result<()> {
                             &mut app,
                             &events.sender(),
                         );
+                        crate::fetch::dispatch_state_query_refetch(
+                            &client,
+                            &mut app,
+                            &events.sender(),
+                        );
                         let _ = crate::fetch::dispatch_inspected_pr_stack_fetch(
                             &client,
                             &mut app,
@@ -1323,6 +1337,7 @@ async fn main() -> Result<()> {
                                     spawn_refresh_active_tab(
                                         &client.muted(),
                                         &app.scope,
+                                        app.requested_state_queries(),
                                         app.active_tab,
                                         app.scoped_sender(events.sender()),
                                     );
@@ -1456,7 +1471,14 @@ async fn main() -> Result<()> {
                         }
                     }
                 }
-                Event::IssuesFetched(issues) => {
+                // Listed before the State filter widened: showing these rows
+                // would pass a narrower list off as the wider view. The
+                // refetch the filter change started replaces them.
+                Event::IssuesFetched(listed, _)
+                    if !app.covers_state_filter(app::Tab::Issues, listed) => {}
+                Event::MrsFetched(listed, _)
+                    if !app.covers_state_filter(app::Tab::MergeRequests, listed) => {}
+                Event::IssuesFetched(listed, issues) => {
                     app.complete_loading_tab(app::Tab::Issues, "Success");
                     app.loaded_tabs.insert(app::Tab::Issues);
                     app.refreshed_tabs.insert(app::Tab::Issues);
@@ -1470,9 +1492,10 @@ async fn main() -> Result<()> {
                     app.update_filter_selection();
                     crate::handlers::tabs::maybe_fetch_related_mrs(&mut app, &events.sender());
                     app.project_cache.issues = app.issues.items.clone();
+                    app.project_cache.issues_state_query = listed;
                     crate::utils::cache::save_cache(app.scope.as_str(), &app.project_cache);
                 }
-                Event::MrsFetched(mrs) => {
+                Event::MrsFetched(listed, mrs) => {
                     app.complete_loading_tab(app::Tab::MergeRequests, "Success");
                     app.loaded_tabs.insert(app::Tab::MergeRequests);
                     app.refreshed_tabs.insert(app::Tab::MergeRequests);
@@ -1499,6 +1522,7 @@ async fn main() -> Result<()> {
                         &events.sender(),
                     );
                     app.project_cache.mrs = app.mrs.items.clone();
+                    app.project_cache.mrs_state_query = listed;
                     crate::utils::cache::save_cache(app.scope.as_str(), &app.project_cache);
                 }
                 Event::IssueFetched(iid, Ok(issue)) => {
@@ -1760,6 +1784,7 @@ async fn main() -> Result<()> {
                         spawn_refresh_active_tab(
                             &client,
                             &app.scope,
+                            app.requested_state_queries(),
                             app::Tab::Issues,
                             app.scoped_sender(events.sender()),
                         );
@@ -1776,6 +1801,7 @@ async fn main() -> Result<()> {
                         spawn_refresh_active_tab(
                             &client,
                             &app.scope,
+                            app.requested_state_queries(),
                             app::Tab::MergeRequests,
                             app.scoped_sender(events.sender()),
                         );
@@ -2195,6 +2221,7 @@ async fn main() -> Result<()> {
                                 spawn_refresh_active_tab(
                                     &client.muted(),
                                     &app.scope,
+                                    app.requested_state_queries(),
                                     tab,
                                     app.scoped_sender(events.sender()),
                                 );
@@ -2354,6 +2381,7 @@ async fn main() -> Result<()> {
                                                     spawn_refresh_active_tab(
                                                         &client,
                                                         &app.scope,
+                                                        app.requested_state_queries(),
                                                         app.active_tab,
                                                         app.scoped_sender(events.sender()),
                                                     );
@@ -2874,8 +2902,14 @@ async fn main() -> Result<()> {
                                                     app.scope.as_str(),
                                                 );
                                                 app.project_cache = cache.clone();
-                                                app.issues.items = cache.issues;
-                                                app.mrs.items = cache.mrs;
+                                                app.restore_cached_issues(
+                                                    cache.issues,
+                                                    cache.issues_state_query,
+                                                );
+                                                app.restore_cached_mrs(
+                                                    cache.mrs,
+                                                    cache.mrs_state_query,
+                                                );
                                                 crate::fetch::derive_workflow(&mut app.mrs.items);
                                                 crate::fetch::sync_linked_references(
                                                     &mut app.issues.items,
@@ -2938,8 +2972,14 @@ async fn main() -> Result<()> {
                                                         app.scope.as_str(),
                                                     );
                                                     app.project_cache = cache.clone();
-                                                    app.issues.items = cache.issues;
-                                                    app.mrs.items = cache.mrs;
+                                                    app.restore_cached_issues(
+                                                        cache.issues,
+                                                        cache.issues_state_query,
+                                                    );
+                                                    app.restore_cached_mrs(
+                                                        cache.mrs,
+                                                        cache.mrs_state_query,
+                                                    );
                                                     // workflow is #[serde(skip)] — see the
                                                     // comment at the startup cache load.
                                                     crate::fetch::derive_workflow(
@@ -7495,6 +7535,7 @@ async fn main() -> Result<()> {
                                                 spawn_refresh_active_tab(
                                                     &client,
                                                     &app.scope,
+                                                    app.requested_state_queries(),
                                                     app.active_tab,
                                                     app.scoped_sender(events.sender()),
                                                 );
@@ -7637,6 +7678,7 @@ async fn main() -> Result<()> {
                                     spawn_refresh_active_tab(
                                         &client,
                                         &app.scope,
+                                        app.requested_state_queries(),
                                         app.active_tab,
                                         app.scoped_sender(events.sender()),
                                     );
@@ -7698,6 +7740,7 @@ async fn main() -> Result<()> {
                                         spawn_refresh_active_tab(
                                             &client,
                                             &app.scope,
+                                            app.requested_state_queries(),
                                             app.active_tab,
                                             app.scoped_sender(events.sender()),
                                         );
@@ -7710,6 +7753,7 @@ async fn main() -> Result<()> {
                                         spawn_refresh_active_tab(
                                             &client,
                                             &app.scope,
+                                            app.requested_state_queries(),
                                             app.active_tab,
                                             app.scoped_sender(events.sender()),
                                         );

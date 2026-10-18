@@ -104,6 +104,7 @@ pub fn toggle_show_read(app: &mut App, tx: &UnboundedSender<Event>) {
     crate::fetch::spawn_refresh_active_tab(
         &client,
         &app.scope,
+        app.requested_state_queries(),
         Tab::Todos,
         app.scoped_sender(tx.clone()),
     );
