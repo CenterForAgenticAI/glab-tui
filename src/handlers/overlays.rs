@@ -620,6 +620,9 @@ fn run_submit_action(
                 state: ListState::default(),
             });
         }
+        crate::app::ConfirmAction::MarkAllTodosRead => {
+            crate::handlers::todos::mark_all_read(app, &tx);
+        }
         crate::app::ConfirmAction::CancelPipeline(pipeline_id) => {
             let Some(client) = app.gitlab_client.clone() else {
                 return;
@@ -1681,6 +1684,7 @@ diff --git a/src/lib.rs b/src/lib.rs
             tx: None,
             page_size: 10,
             api_per_page: 10,
+            show_read_notifications: false,
         });
 
         press_in_submit_dialog(&mut app, KeyCode::Left);

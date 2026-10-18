@@ -1232,6 +1232,14 @@ pub struct KeybindingTodos {
     pub mark_as_read: String,
     #[serde(default)]
     pub open_in_browser: String,
+    #[serde(default = "def_mark_as_done")]
+    pub mark_as_done: String,
+    #[serde(default = "def_mark_all_as_read")]
+    pub mark_all_as_read: String,
+    #[serde(default = "def_unsubscribe")]
+    pub unsubscribe: String,
+    #[serde(default = "def_toggle_show_read")]
+    pub toggle_show_read: String,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -1405,6 +1413,10 @@ keybind_defaults! {
     def_edit_description = "e",
     def_mark_as_read = "Enter",
     def_open_in_browser_todo = "o",
+    def_mark_as_done = "d",
+    def_mark_all_as_read = "A",
+    def_unsubscribe = "U",
+    def_toggle_show_read = "r",
     def_create_branch = "n",
     def_delete_branch = "d",
     def_view_deployments = "Enter",
@@ -1572,6 +1584,10 @@ impl Default for KeybindingTodos {
         Self {
             mark_as_read: def_mark_as_read(),
             open_in_browser: def_open_in_browser_todo(),
+            mark_as_done: def_mark_as_done(),
+            mark_all_as_read: def_mark_all_as_read(),
+            unsubscribe: def_unsubscribe(),
+            toggle_show_read: def_toggle_show_read(),
         }
     }
 }
@@ -1936,6 +1952,10 @@ edit_description = "e"
 [keybindings.todos]
 mark_as_read = "Enter"
 open_in_browser = "o"
+mark_as_done = "d"
+mark_all_as_read = "A"
+unsubscribe = "U"
+toggle_show_read = "r"
 
 [keybindings.branches]
 create_branch = "n"

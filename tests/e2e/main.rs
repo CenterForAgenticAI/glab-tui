@@ -19,6 +19,7 @@ mod scenarios;
 mod secondary_tabs;
 mod stacked_prs;
 mod tabs;
+mod todos;
 mod workspace;
 
 // Declarations of libc functions

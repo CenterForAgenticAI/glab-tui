@@ -54,7 +54,13 @@ pub enum Event {
         comments: Vec<crate::domain::mr::DiscussionNote>,
     },
     DiffFetchFailed(String),
-    TodosFetched(Vec<crate::domain::notifications::Notification>),
+    /// `show_read` is the filter the list was requested with. A result for a
+    /// filter the user has since toggled away from is stale.
+    TodosFetched {
+        notifications: Vec<crate::domain::notifications::Notification>,
+        show_read: bool,
+    },
+    TodoChanged(crate::domain::notifications::TodoChange, Result<(), String>),
     JobsTabFetched(u64, Vec<crate::domain::pipelines::Job>),
     CommandStarted(String),
     CommandCompleted(crate::app::Tab, Result<(), String>),
@@ -133,8 +139,6 @@ pub enum Event {
         job_id: u64,
         status: String,
     },
-    /// The backend confirmed the todo/notification with this id as read.
-    TodoMarkedRead(String),
     /// A background fetch result, tagged with the scope generation that was
     /// current when the fetch started. Built only by `ScopedSender`.
     Scoped(ScopeGeneration, Box<Event>),

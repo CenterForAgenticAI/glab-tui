@@ -3744,6 +3744,7 @@ mod tests {
             tx: None,
             page_size: 30,
             api_per_page: 30,
+            show_read_notifications: false,
         });
         app.active_tab = Tab::MergeRequests;
         app.loading_tabs.insert(Tab::MergeRequests);
@@ -3776,6 +3777,7 @@ mod tests {
             tx: None,
             page_size: 30,
             api_per_page: 30,
+            show_read_notifications: false,
         });
         app.active_tab = Tab::MergeRequests;
         app.loading_tabs.insert(Tab::MergeRequests);
