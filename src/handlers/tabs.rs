@@ -1690,6 +1690,7 @@ pub async fn handle_active_tab_key(
                                 let job_ids: Vec<u64> = if app.selected_jobs.is_empty() {
                                     vec![job_id]
                                 } else {
+                                    app.status_message = None;
                                     app.selected_jobs.drain().collect()
                                 };
                                 let rows = flip_job_statuses(app, &job_ids, "running");
@@ -1721,10 +1722,11 @@ pub async fn handle_active_tab_key(
                                 key_event,
                             ) =>
                         {
-                            if app.is_github() {
-                                app.error_message =
-                                    Some("Manual job start is not supported on GitHub".to_string());
-                            } else if let Some(client) = &app.gitlab_client {
+                            // GitHub cannot start a manual job. The key is still
+                            // taken there, so it never reaches a custom binding.
+                            if !app.is_github()
+                                && let Some(client) = &app.gitlab_client
+                            {
                                 let client_clone = client.clone();
                                 let pipe_id = app.active_pipeline_id.unwrap_or(0);
                                 let project_context = app.project_path_for_pipeline(pipe_id);
@@ -2605,7 +2607,7 @@ pub async fn handle_active_tab_key(
             }
             KeyCode::Esc | KeyCode::Backspace => {
                 if app.clear_selections() {
-                    // Selections cleared; fall through to other Esc semantics below.
+                    app.status_message = None;
                 } else if app.job_trace_loading {
                     app.job_trace_loading = false;
                     app.pending_job_trace_editor = None;

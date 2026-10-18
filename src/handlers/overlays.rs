@@ -650,6 +650,7 @@ fn run_submit_action(
             };
             let rows = flip_job_statuses(app, &job_ids, "canceled");
             app.selected_jobs.clear();
+            app.status_message = None;
             spawn_cancel_jobs(
                 client,
                 app.scoped_sender(tx),
