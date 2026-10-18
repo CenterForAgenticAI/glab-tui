@@ -67,7 +67,7 @@ A terminal user interface (TUI) for GitLab and GitHub, built on top of [`glab`](
 - **Code Reviews & Diff View** — draft inline comments, multi-line selections, code suggestions with syntax highlighting, mark files as reviewed (`m`/`M`), and atomic review submission
 - **Side-by-Side Diff** — toggle between unified and side-by-side diff layouts with theme-aware syntax highlighting and tab-stop expansion
 - **Pipelines / Actions** — inspect pipelines and their jobs, retry/cancel pipelines/actions and individual jobs, stream build traces; trigger pipelines with `workflow_dispatch` input prompts
-- **Runners** — list runners with structured details panel; pause/resume, edit descriptions, and monitor live runner status
+- **Runners** — list runners with structured details panel and monitor live runner status; pause/resume and edit descriptions (GitLab)
 - **Releases** — browse, create, and edit project releases directly in the terminal
 - **Todos / Notifications** — tab with badges, relative timestamps, fuzzy search, and an Updated column
 - **Milestones** — progress bar column, inline editing, and milestone issue caching
@@ -698,7 +698,7 @@ glab-tui reads at most the first 16 MiB of a job log. A longer one is marked `[T
 
 ### Runners tab
 
-> Remappable via `[keybindings.runners]` in `config.toml`.
+> Remappable via `[keybindings.runners]` in `config.toml`. Pause, resume and edit are GitLab-only: GitHub's runner API has no pause, resume or description endpoint, so on GitHub these keys do nothing. The tab lists a single repository's runners, so it is unavailable in group scope.
 
 | Key | Action | Config |
 |---|---|---|
