@@ -3429,9 +3429,15 @@ pub(crate) fn render_tab_environments(
     }
 }
 
-pub(crate) fn render_tab_terminal(f: &mut Frame, app: &mut App, content_area: Rect) {
+pub(crate) fn render_tab_terminal(
+    f: &mut Frame,
+    app: &mut App,
+    content_area: Rect,
+    highlight_style: Style,
+) {
     let theme = THEME.read().unwrap();
-    let num_cmds = app.terminal_commands.len();
+    let entries = app.filtered_terminal_commands();
+    let num_cmds = entries.len();
     let area = content_area;
     let base_block = Block::default()
         .borders(Borders::ALL)
@@ -3445,8 +3451,7 @@ pub(crate) fn render_tab_terminal(f: &mut Frame, app: &mut App, content_area: Re
     let width = inner_rect.width as usize;
 
     let total_lines = if app.terminal_wrap {
-        let full_text: String = app
-            .terminal_commands
+        let full_text: String = entries
             .iter()
             .map(|cmd| {
                 let line = super::helpers::build_log_line(cmd, usize::MAX);
@@ -3463,18 +3468,24 @@ pub(crate) fn render_tab_terminal(f: &mut Frame, app: &mut App, content_area: Re
         num_cmds
     };
 
-    let max_scroll = total_lines.saturating_sub(log_height);
-    app.terminal_scroll = app.terminal_scroll.min(max_scroll);
-
-    let block_title = if app.terminal_wrap {
-        format!(" Terminal (Wrap) [{total_lines} lines] ")
-    } else if app.terminal_scroll > 0 {
-        format!(
-            " Terminal (Scroll: {}/{}) ",
-            app.terminal_scroll, max_scroll,
-        )
+    let max_scroll = if app.terminal_wrap {
+        total_lines.saturating_sub(log_height)
     } else {
-        " Terminal ".to_string()
+        num_cmds.saturating_sub(1)
+    };
+    let scroll = app.terminal_scroll.min(max_scroll);
+
+    let filter_count = if app.search_query.trim().is_empty() {
+        String::new()
+    } else {
+        format!(" [{}/{}]", num_cmds, app.terminal_commands.len())
+    };
+    let block_title = if app.terminal_wrap {
+        format!(" Terminal (Wrap){filter_count} [{total_lines} lines] ")
+    } else if scroll > 0 {
+        format!(" Terminal (Scroll: {scroll}/{max_scroll}){filter_count} ")
+    } else {
+        format!(" Terminal{filter_count} ")
     };
     let custom_main_block = base_block.clone().title(block_title).title_style(
         Style::default()
@@ -3482,21 +3493,18 @@ pub(crate) fn render_tab_terminal(f: &mut Frame, app: &mut App, content_area: Re
             .add_modifier(Modifier::BOLD),
     );
 
-    if app.terminal_wrap {
-        let all_lines: Vec<Line> = app
-            .terminal_commands
+    let paragraph = if app.terminal_wrap {
+        let all_lines: Vec<Line> = entries
             .iter()
             .map(|cmd| super::helpers::build_log_line(cmd, usize::MAX))
             .collect();
 
-        let paragraph = Paragraph::new(all_lines)
+        Paragraph::new(all_lines)
             .block(custom_main_block)
-            .scroll((app.terminal_scroll as u16, 0))
-            .wrap(ratatui::widgets::Wrap { trim: false });
-
-        f.render_widget(paragraph, area);
+            .scroll((scroll as u16, 0))
+            .wrap(ratatui::widgets::Wrap { trim: false })
     } else {
-        let end_idx = num_cmds.saturating_sub(app.terminal_scroll);
+        let end_idx = num_cmds.saturating_sub(scroll);
         let start_idx = end_idx.saturating_sub(log_height);
 
         let mut log_lines = Vec::new();
@@ -3507,17 +3515,20 @@ pub(crate) fn render_tab_terminal(f: &mut Frame, app: &mut App, content_area: Re
             }
         }
 
-        for i in start_idx..end_idx {
-            if let Some(cmd) = app.terminal_commands.get(i) {
-                log_lines.push(super::helpers::build_log_line(
-                    cmd,
-                    inner_rect.width as usize,
-                ));
-            }
+        let cursor = end_idx.checked_sub(1);
+        for (index, cmd) in entries.iter().enumerate().take(end_idx).skip(start_idx) {
+            let line = super::helpers::build_log_line(cmd, width);
+            log_lines.push(if Some(index) == cursor {
+                line.patch_style(highlight_style)
+            } else {
+                line
+            });
         }
 
-        f.render_widget(Paragraph::new(log_lines).block(custom_main_block), area);
-    }
+        Paragraph::new(log_lines).block(custom_main_block)
+    };
+    app.terminal_scroll = scroll;
+    f.render_widget(paragraph, area);
 }
 
 #[cfg(test)]
@@ -4021,6 +4032,32 @@ mod tests {
             env_row.split_whitespace().collect::<Vec<_>>(),
             ["production", "available", "N/A", "https://prod.example"],
         );
+    }
+
+    #[test]
+    fn unwrapped_terminal_scrolls_until_the_oldest_entry_is_the_copied_row() {
+        let backend = TestBackend::new(100, 30);
+        let mut terminal = Terminal::new(backend).unwrap();
+        let mut app = App::default();
+        for command in ["Fetch issues: glab issue list", "Fetch MRs: glab mr list"] {
+            app.terminal_commands
+                .push(crate::command_log::TerminalCommand {
+                    timestamp: String::new(),
+                    command: command.to_string(),
+                    status: "Success".to_string(),
+                });
+        }
+        app.terminal_scroll = usize::MAX;
+
+        terminal
+            .draw(|f| {
+                let area = f.area();
+                render_tab_terminal(f, &mut app, area, Style::default());
+            })
+            .unwrap();
+
+        assert_eq!(app.terminal_scroll, 1);
+        assert_eq!(app.terminal_cursor(app.terminal_commands.len()), Some(0));
     }
 
     #[test]
