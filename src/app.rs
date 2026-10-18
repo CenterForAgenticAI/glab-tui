@@ -2781,7 +2781,6 @@ pub enum TextInputAction {
         end_old_line_num: Option<u32>,
     },
     EnterPipelineId,
-    CreateRelease,
     CreateMilestone,
     SubmitReviewFinal {
         mr_iid: u64,
@@ -3342,9 +3341,9 @@ impl SubmitDialog {
     }
 
     /// Build the dialog for an action whose target carries no project of
-    /// its own (a release, a branch, a bulk merge whose items each name
-    /// theirs): it acts on the current scope. Actions on a listed issue, MR
-    /// or milestone go through [`Self::build_with_project`] instead.
+    /// its own (a branch, a bulk merge whose items each name theirs): it
+    /// acts on the current scope. Actions on a listed issue, MR, milestone
+    /// or release go through [`Self::build_with_project`] instead.
     pub fn build(action: ConfirmAction, app: &App) -> Self {
         Self::build_with_project(action, app.scope.as_str().to_string(), app)
     }
@@ -3949,7 +3948,8 @@ pub struct App {
     pub last_attr_refresh: std::time::Instant,
     /// (project path, iid) of the milestone whose deletion is in flight.
     pub pending_delete_milestone: Option<(String, u64)>,
-    pub pending_delete_release_tag: Option<String>,
+    /// (project path, tag) of the release whose deletion is in flight.
+    pub pending_delete_release: Option<(String, String)>,
 }
 
 impl Default for App {
@@ -4094,7 +4094,7 @@ impl Default for App {
             cached_members: Vec::new(),
             last_attr_refresh: std::time::Instant::now(),
             pending_delete_milestone: None,
-            pending_delete_release_tag: None,
+            pending_delete_release: None,
         }
     }
 }
@@ -4531,10 +4531,6 @@ impl App {
     /// their own: they all belong to the active pipeline.
     pub fn project_path_for_jobs(&self) -> String {
         self.project_path_for_pipeline(self.active_pipeline_id.unwrap_or(0))
-    }
-
-    pub fn project_path_for_release(&self, _tag_name: &str) -> String {
-        self.scope.as_str().to_string()
     }
 
     pub fn project_path_for_milestone(&self, iid: u64) -> String {
@@ -7927,6 +7923,19 @@ mod tests {
         };
         let values = App::milestone_filter_values(&closed, "State");
         assert_eq!(values, vec!["CLOSED".to_string()]);
+    }
+
+    #[test]
+    fn release_project_is_its_own_and_falls_back_to_scope_when_unknown() {
+        let scope = crate::scope::Scope::Group("group".to_string());
+        let listed = crate::domain::releases::Release {
+            project_path: "group/repo-a".to_string(),
+            ..release_fixture("v1.0.0", "")
+        };
+        let cached_without_project = release_fixture("v1.0.0", "");
+
+        assert_eq!(listed.project_or(&scope), "group/repo-a");
+        assert_eq!(cached_without_project.project_or(&scope), "group");
     }
 
     fn release_fixture(tag: &str, notes: &str) -> crate::domain::releases::Release {

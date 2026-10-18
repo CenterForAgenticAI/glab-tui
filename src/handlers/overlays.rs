@@ -273,7 +273,7 @@ fn run_submit_action(
             });
         }
         crate::app::ConfirmAction::DeleteRelease(tag_name) => {
-            app.pending_delete_release_tag = Some(tag_name.clone());
+            app.pending_delete_release = Some((project_path.clone(), tag_name.clone()));
             let client = app.gitlab_client.clone().unwrap();
             tokio::spawn(async move {
                 let res =

@@ -2358,6 +2358,7 @@ impl Backend for GlabBackend {
                     commit_id,
                     commit_title,
                     assets_link: r.assets_link,
+                    project_path: project.clone(),
                 }
             })
             .collect())
