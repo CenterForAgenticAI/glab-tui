@@ -2055,15 +2055,33 @@ async fn main() -> Result<()> {
                     environment,
                     deployments,
                 } => {
-                    if app.is_highlighted_environment(&environment) {
-                        let mut table = crate::utils::ui::StatefulTable::with_items(deployments);
-                        table.state.select(Some(0));
-                        app.environment_deployments =
-                            Some(app::EnvironmentDeployments { environment, table });
-                    }
                     app.status_message = None;
+                    if deployments.is_empty() {
+                        app.show_notice(format!("No deployments for {environment}"));
+                    }
+                    app.show_deployments(environment, deployments);
                     app.update_filter_selection();
                 }
+                Event::DeploymentLogFetched {
+                    deployment_id,
+                    result,
+                } if app.take_pending_deployment_log(deployment_id) => match result {
+                    Ok(trace) => {
+                        let prefix = format!("deployment_{deployment_id}_log_");
+                        if let Err(error) =
+                            crate::editor::view_in_editor(trace.text(), &prefix, &mut terminal)
+                        {
+                            app.show_error(format!(
+                                "Failed to open deployment log in editor: {error}"
+                            ));
+                        }
+                    }
+                    Err(error) => {
+                        app.show_error(format!("Failed to fetch deployment log: {error}"));
+                        app.error_has_cli_detail = true;
+                    }
+                },
+                Event::DeploymentLogFetched { .. } => {}
                 Event::RelatedMrsFetched { issue_iid, result } => {
                     app.fetching_related_mrs.remove(&issue_iid);
                     let new_state = match result {
@@ -7900,6 +7918,7 @@ async fn main() -> Result<()> {
                         && app.text_input.is_none()
                         && app.edit_menu.is_none()
                         && app.selector.is_none()
+                        && !app.is_deployments_focus_key(&key_event)
                     {
                         app.focus_column_checklist = true;
                         app.column_checklist_idx = 0;

@@ -156,6 +156,13 @@ Group/org-level browsing is supported via the `Scope` enum ([src/scope.rs](src/s
 * Scrolling the log to a line goes through `App::job_trace_scroll_to_line`, resolved by `render_job_trace` with `JobTraceView::jump_to_line`, because only the draw knows the wrapped width. `jump_to_failure` (`E`) searches from `JobTraceView::failure_search_start()`, so a failure on the last page, which the scroll clamp keeps from reaching the top of the pane, is passed on the next press; without a trace it fetches one and sets `App::pending_job_trace_failure`, consumed on `JobTraceFetched` like `pending_job_trace_editor`.
 * `copy_url` (`y`) copies `Job::web_url` (GitLab `web_url`, GitHub `url` from `gh run view --json jobs`) and `copy_id` (`Y`) the job id. `copy_sha` defaults to `Alt+y` on this tab.
 
+### Environments Tab (deployments, rollback, stop)
+* `view_deployments` (`Enter`) fetches the highlighted environment's deployments, and `Event::DeploymentsFetched` goes through `App::show_deployments`, which ignores an environment no longer highlighted and keeps the focus and the selected deployment (by id) when the shown environment is refetched. `App::discard_stale_deployments` drops them once another environment is highlighted.
+* `EnvironmentDeployments::is_focused` decides where navigation goes: `handlers::tabs::handle_focused_deployments_key` takes `j`/`k`/arrows/`Home`/`End` and `Esc`/`Backspace` (unfocus) before the environment list sees them. Focus only counts while the detail pane is on screen (`detail_visible` and a `detail_rect` from the last frame), so hiding it with `q` or a terminal under 90 columns hands the keys back to the environment list. `focus_deployments` defaults to `Tab`, which is also `global.configure`, so the event loop skips the configure check while `App::is_deployments_focus_key` holds (deployments listed on the Environments tab). `,` still opens the Configure View there.
+* The detail pane shows the deployments table over `build_deployment_document` for the selected one. Without listed deployments it shows `build_environment_document`, whose content lists the configured action keys.
+* `rollback_deployment` (`R`) and `stop_environment` (`d`) open `ConfirmAction::RollbackDeployment` / `StopEnvironment` (both default to Cancel). GitLab rolls back by re-running the deployment's job (`Deployment::job_id`), so a deployment without one is refused before the dialog opens. GitHub rolls back by creating a deployment of the commit, which deploys nothing by itself: it only takes effect once a workflow running `on: deployment` picks it up, and the dialog says so. A successful rollback refetches the environment list and its deployments.
+* `view_deployment_log` (`e`) fetches the deployment job's trace and opens it in the editor from `Event::DeploymentLogFetched`. Like `pending_job_trace_editor` on the Jobs tab, `App::pending_deployment_log` records the request: a second `e` while it is in flight starts no second fetch, and `App::take_pending_deployment_log` opens the log only while that deployment is still selected on the Environments tab. GitHub deployments carry no job, so like `start_job` the key is left out of the help overlay and of `build_environment_document`'s action list there, and pressing it is still consumed and raises an error.
+
 ### Rate Limiting (`src/backend/rate_limit.rs`)
 * `ApiRateLimiter` is a global (`RATE_LIMITER`) that shields every `glab`/`gh` CLI call from HTTP 429 and GitLab GraphQL rate-limit errors.
 * Backend command execution delegates to `rate_limit::execute_with_retry` (used by both `GlabBackend` and `GhBackend`), which:
@@ -255,7 +262,7 @@ Group/org-level browsing is supported via the `Scope` enum ([src/scope.rs](src/s
 * Navigation: `h`/`l` → previous/next month, `j`/`k` → previous/next day, `Enter` → confirm, `Esc` → cancel.
 
 ### Submit Dialog & Confirmations (`SubmitDialog`)
-* Mutating and destructive actions (close/reopen issue/MR, merge MR, bulk merge, delete branch/release/milestone/issue/MR, rebase, revoke approval, submit review, cancel pipeline, bulk job cancel) open a `SubmitDialog` ([src/app.rs](src/app.rs)). Confirmed bulk job cancels are paced with `pace_bulk_operation()`.
+* Mutating and destructive actions (close/reopen issue/MR, merge MR, bulk merge, delete branch/release/milestone/issue/MR, rebase, revoke approval, submit review, cancel pipeline, bulk job cancel, stop environment, roll back deployment) open a `SubmitDialog` ([src/app.rs](src/app.rs)). Confirmed bulk job cancels are paced with `pace_bulk_operation()`.
 * Pipeline and job actions resolve their project through `App::project_path_for_pipeline(id)` (the listed row's `project_path`, then `active_pipeline_project` for the active pipeline, then the scope) or `App::project_path_for_jobs()` for the Jobs tab. `App::pipeline_project(id)` / `App::jobs_project()` are the same lookups without the scope fallback, and `active_pipeline_project` only ever holds what `pipeline_project` resolved, never the scope. Never pass `app.scope.as_str()` as a pipeline/job project: in group scope it is the group path.
 * Includes title, context-aware description body, optional toggleable options (squash, delete branch, auto-merge), and explicit `[ Submit ]` (left, idx 0) and `[ Cancel ]` (right) buttons. `SubmitDialog::extra_buttons` (`DialogChoice`) adds buttons between them; the submit-review dialog uses it for `Keep drafts` / `Discard`.
 * Navigation: `h`/`l` / Left/Right move to the neighbouring button, `j`/`k` / Up/Down for vertical option traversal, `Tab`/`BackTab` for full control cycling, `Space` to toggle options, `Enter` to activate focused button, `Esc` to cancel. Cancel never has side effects.
@@ -337,6 +344,7 @@ Every interaction with GitLab/GitHub goes through `glab` or `gh` CLI. This secti
 | Retry job | `glab ci retry <job_id> -R <repo>` |
 | Cancel job | `glab ci cancel job <id> -R <repo>` |
 | Start manual job | `glab ci retry <job_id> -R <repo>` |
+| Roll back deployment | `glab ci retry <deployment job id> -R <repo>` (re-runs the selected deployment's `deployable` job) |
 | Run pipeline (variables/inputs) | `glab ci run [--branch <ref>] [--mr] [--variables k:v ...] [--input k:v ...]` |
 | Mark todo done | `glab todo done <id>` |
 | Mark all todos done | `glab todo done --all` |
@@ -360,7 +368,8 @@ Every interaction with GitLab/GitHub goes through `glab` or `gh` CLI. This secti
 | Create branch | `POST /projects/{}/repository/branches?branch=...&ref=...` | No `glab branch` command |
 | Delete branch | `DELETE /projects/{}/repository/branches/{}` | No `glab branch` command |
 | List environments | `GET /projects/{}/environments?per_page=<N>` | No native command |
-| List deployments | `GET /projects/{}/deployments?per_page=<N>` | No native command |
+| List deployments | `GET /projects/{}/deployments?per_page=<N>&order_by=id&sort=desc[&environment=<name>]` | No native command. The API sorts oldest first by default, which would cut the newest deployments off the page |
+| Stop environment | `POST /projects/{}/environments/{}/stop` | No native command |
 | List members | `GET /projects/{}/members/all?per_page=100` | `glab repo members` only has add/remove |
 | Retry pipeline | `POST /projects/{}/pipelines/{}/retry` | `glab ci retry` is job-only; no pipeline retry subcommand |
 | MR approval/mergeability state | `glab api graphql` over `mergeRequests(iids: [...])` | `glab mr list` exposes neither axis; one bulk query fills the Approval/Mergeable columns (batched by `api_per_page`) |
@@ -370,7 +379,7 @@ Every interaction with GitLab/GitHub goes through `glab` or `gh` CLI. This secti
 | List group milestones | `GET /groups/{}/milestones?per_page=<N>` | Native `glab milestone list --group` returns only the group's own milestones per project |
 | List group labels | `GET /groups/{}/labels?per_page=<N>` | `glab label list -g` has no pagination control |
 | List environments | `GET /projects/{}/environments?per_page=<N>` | No native command |
-| List deployments | `GET /projects/{}/deployments?per_page=<N>` | No native command |
+| List deployments | `GET /projects/{}/deployments?per_page=<N>&order_by=id&sort=desc[&environment=<name>]` | No native command |
 | Review draft notes | `POST /projects/{}/merge_requests/{}/draft_notes` per comment, then one `POST .../draft_notes/bulk_publish` | `glab mr note create` posts one note at a time and cannot batch them into a review |
 
 ### GhBackend (`src/backend/gh.rs`)
@@ -428,12 +437,14 @@ Every interaction with GitLab/GitHub goes through `glab` or `gh` CLI. This secti
 | Create branch | `POST /repos/{}/git/refs` | No native command |
 | Delete branch | `DELETE /repos/{}/git/refs/heads/{}` | No native command |
 | List environments | `GET /repos/{}/environments?per_page=<N>` | No native command |
-| List deployments | `GET /repos/{}/deployments?per_page=<N>` | No native command |
+| List deployments | `GET /repos/{}/deployments?per_page=<N>[&environment=<name>]` | No native command |
+| Stop environment | `GET /repos/{}/deployments?per_page=30&environment=<name>`, then `GET /repos/{}/deployments/{}/statuses?per_page=1` for each, newest first, until one is `success`, then `POST /repos/{}/deployments/{}/statuses` with `state: inactive` on that one | GitHub has no environment stop: deactivating the live deployment (the newest whose latest status is `success`) is its equivalent. The deployment list carries no status, so each one is asked |
+| Roll back deployment | `POST /repos/{}/deployments` with `ref: <sha>`, `environment`, `auto_merge: false`, `required_contexts: []` | No native command. Empty `required_contexts` skips GitHub's commit-status check, which would refuse an already deployed SHA whose statuses are not all green |
 | List members | `GET /repos/{}/assignees?per_page=100` | No native command |
 | Update milestone | `PATCH repos/{}/milestones/{}` | No `gh milestone` command |
 | Delete milestone | `DELETE repos/{}/milestones/{}` | No `gh milestone` command |
 | List environments | `GET /repos/{}/environments?per_page=<N>` | No native command |
-| List deployments | `GET /repos/{}/deployments?per_page=<N>` | No native command |
+| List deployments | `GET /repos/{}/deployments?per_page=<N>[&environment=<name>]` | No native command |
 | List members | `GET /repos/{}/assignees?per_page=100` | No native command |
 | Submit review | `POST /repos/{}/pulls/{}/reviews` (`body`, `event`, `comments[]` with `side`/`start_line`) | `gh pr review` has no inline comments; one call carries the whole review |
 | Reply to review thread | `POST /repos/{}/pulls/{}/comments` with `in_reply_to` | `gh pr comment` cannot reply to a review comment |

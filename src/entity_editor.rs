@@ -875,6 +875,8 @@ pub fn build_branch_document(
 
 pub fn build_environment_document(
     env: &crate::domain::deployments::Environment,
+    keys: &crate::config::KeybindingEnvironments,
+    is_github: bool,
 ) -> crate::app::EntityDocument {
     let mut fields = vec![
         crate::app::Field::read_only("Environment", env.name.clone()),
@@ -899,7 +901,7 @@ pub fn build_environment_document(
         ));
         fields.push(crate::app::Field::read_only(
             "Deploy SHA",
-            crate::utils::format::truncate(&dep.sha, 8),
+            dep.short_sha().to_string(),
         ));
         if let Some(user) = &dep.user {
             fields.push(crate::app::Field::read_only(
@@ -912,10 +914,82 @@ pub fn build_environment_document(
             crate::utils::format::time_ago(&dep.created_at),
         ));
     }
+    let mut action_lines = vec![format!(
+        "- `{}` rolls back to the selected deployment",
+        keys.rollback_deployment
+    )];
+    if !is_github {
+        action_lines.push(format!(
+            "- `{}` opens the selected deployment's job log",
+            keys.view_deployment_log
+        ));
+    }
+    action_lines.push(format!(
+        "- `{}` stops the environment",
+        keys.stop_environment
+    ));
+    action_lines.push(format!("- `{}` copies its URL", keys.copy_url));
+    let actions = format!(
+        "Press `{}` to list this environment's deployments and `{}` to move between them and \
+         the environment list.\n\n{}",
+        keys.view_deployments,
+        keys.focus_deployments,
+        action_lines.join("\n"),
+    );
     crate::app::EntityDocument {
         title: format!("Environment {}", env.name),
         fields,
-        content: crate::app::InspectorContent::Empty("Environment details"),
+        content: crate::app::InspectorContent::Markdown(actions),
+    }
+}
+
+pub fn build_deployment_document(
+    deployment: &crate::domain::deployments::Deployment,
+) -> crate::app::EntityDocument {
+    let mut fields = vec![
+        crate::app::Field::read_only("Deployment", format!("#{}", deployment.iid)),
+        crate::app::Field::read_only("Deploy Status", deployment.status.to_uppercase()),
+        crate::app::Field::read_only(
+            if deployment.tag { "Tag" } else { "Ref" },
+            deployment.ref_name.clone(),
+        ),
+        crate::app::Field::read_only("Commit", deployment.sha.clone()),
+    ];
+    if let Some(user) = &deployment.user {
+        fields.push(crate::app::Field::read_only(
+            "Deployer",
+            format!("@{}", user.username),
+        ));
+    }
+    if let Some(job) = &deployment.deployable {
+        fields.push(crate::app::Field::read_only(
+            "Job",
+            format!("{} (#{})", job.name, job.id),
+        ));
+        if let Some(status) = &job.status {
+            fields.push(crate::app::Field::read_only(
+                "Status",
+                status.to_uppercase(),
+            ));
+        }
+    }
+    fields.push(crate::app::Field::read_only(
+        "Created",
+        crate::utils::format::time_ago(&deployment.created_at),
+    ));
+    fields.push(crate::app::Field::read_only(
+        "Updated",
+        crate::utils::format::time_ago(&deployment.updated_at),
+    ));
+    let content = if deployment.description.trim().is_empty() {
+        crate::app::InspectorContent::Empty("No deployment notes")
+    } else {
+        crate::app::InspectorContent::Markdown(deployment.description.clone())
+    };
+    crate::app::EntityDocument {
+        title: format!("Deployment #{}", deployment.iid),
+        fields,
+        content,
     }
 }
 
