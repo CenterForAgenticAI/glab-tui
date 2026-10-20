@@ -57,6 +57,8 @@ pub(crate) fn render_overlays(f: &mut Frame, app: &mut App, size: Rect) {
 
     // Below every other overlay: its comment actions and reply prompts open on top.
     super::review_threads::render_review_threads(f, app, size);
+    // Below the re-run confirmation it opens.
+    super::terminal_inspector::render_terminal_inspector(f, app, size);
 
     if app.column_filter_context.is_none() {
         if let Some(selector) = &mut app.selector {
@@ -987,6 +989,7 @@ pub(crate) fn render_overlays(f: &mut Frame, app: &mut App, size: Rect) {
             crate::app::ConfirmAction::MarkAllTodosRead => icons.tab_todo.clone(),
             crate::app::ConfirmAction::CancelPipeline(_)
             | crate::app::ConfirmAction::CancelJobs { .. } => icons.status_canceled.clone(),
+            crate::app::ConfirmAction::RerunCommand(_) => icons.tab_terminal.clone(),
             crate::app::ConfirmAction::StopEnvironment(_) => icons.action_close.clone(),
             crate::app::ConfirmAction::RollbackDeployment { .. } => icons.label_deployment.clone(),
         };
@@ -1859,8 +1862,31 @@ pub(crate) fn render_help(f: &mut Frame, app: &mut App, size: Rect) {
         },
         Shortcut {
             category: "Terminal",
+            key: d(format!(
+                "{} / P",
+                app.config.keybindings.terminal.inspect_command
+            )),
+            action: "Inspect the highlighted command (full command, timing, stdout, stderr)",
+        },
+        Shortcut {
+            category: "Terminal",
+            key: d(app.config.keybindings.terminal.cycle_status_filter.clone()),
+            action: "Cycle the status filter: All, Errors, Success",
+        },
+        Shortcut {
+            category: "Terminal",
+            key: d(app.config.keybindings.terminal.rerun_command.clone()),
+            action: "Re-run the highlighted glab, gh or git call",
+        },
+        Shortcut {
+            category: "Terminal",
             key: d(app.config.keybindings.terminal.copy_command.clone()),
             action: "Copy the highlighted command line",
+        },
+        Shortcut {
+            category: "Terminal",
+            key: d(app.config.keybindings.terminal.copy_output.clone()),
+            action: "Copy the highlighted command's output or error",
         },
         Shortcut {
             category: "Terminal",

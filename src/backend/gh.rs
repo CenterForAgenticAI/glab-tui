@@ -1,5 +1,7 @@
 use super::Backend;
 use super::bounded_output::{CapturedStdout, output_bounded};
+use super::logged_command::{ChildOutput, LoggedCommand};
+use crate::command_log::{Invocation, Program};
 use crate::domain::branches::Branch;
 use crate::domain::deployments::{Deployment, Environment};
 use crate::domain::issues::{Issue, RelatedMrRef};
@@ -496,38 +498,28 @@ async fn run_gh_command(
     desc: &str,
     max_stdout_bytes: Option<usize>,
 ) -> Result<CapturedStdout> {
-    let cmd_str = format!("gh {}", args.join(" "));
+    let logged = LoggedCommand::start(desc, Invocation::new(Program::Gh, args));
 
     let output = match output_bounded(Command::new("gh").args(args), max_stdout_bytes).await {
         Ok(output) => output,
         Err(e) => {
-            log_terminal_command(tx.as_ref(), desc, &cmd_str, format!("Failed: {e}"));
+            logged.finish(
+                tx.as_ref(),
+                format!("Failed: {e}"),
+                ChildOutput::NOT_STARTED,
+            );
             return Err(e.into());
         }
     };
 
     if output.succeeded() {
-        log_terminal_command(tx.as_ref(), desc, &cmd_str, "Success".to_string());
+        logged.finish(tx.as_ref(), "Success".to_string(), output.child_output());
         Ok(output.stdout)
     } else {
-        let err_msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        log_terminal_command(tx.as_ref(), desc, &cmd_str, format!("Failed: {err_msg}"));
-        anyhow::bail!("gh command failed: {err_msg}")
-    }
-}
-
-fn log_terminal_command(
-    tx: Option<&UnboundedSender<Event>>,
-    desc: &str,
-    cmd_str: &str,
-    status: String,
-) {
-    if let Some(tx) = tx {
-        let _ = tx.send(Event::TerminalCommandLogged {
-            timestamp: chrono::Local::now().format("%H:%M:%S").to_string(),
-            command: format!("{}: {}", desc.to_uppercase(), cmd_str),
-            status,
-        });
+        let child_output = output.child_output();
+        let reason = logged.failure_reason(&child_output);
+        logged.finish(tx.as_ref(), format!("Failed: {reason}"), child_output);
+        anyhow::bail!("gh command failed: {reason}")
     }
 }
 
@@ -579,17 +571,22 @@ async fn run_git_command(
     desc: &str,
     max_stdout_bytes: Option<usize>,
 ) -> Result<CapturedStdout> {
-    let cmd_str = format!("git -C {checkout} {}", args.join(" "));
+    let git_args: Vec<&str> = ["-C", checkout]
+        .into_iter()
+        .chain(args.iter().copied())
+        .collect();
+    let logged = LoggedCommand::start(desc, Invocation::new(Program::Git, &git_args));
     let output = output_bounded(git_in(checkout).args(args), max_stdout_bytes)
         .await
-        .with_context(|| format!("Failed to execute: {cmd_str}"))?;
+        .with_context(|| format!("Failed to execute: {}", logged.command_line()))?;
     if output.succeeded() {
-        log_terminal_command(tx, desc, &cmd_str, "Success".to_string());
+        logged.finish(tx, "Success".to_string(), output.child_output());
         Ok(output.stdout)
     } else {
-        let err_msg = String::from_utf8_lossy(&output.stderr).trim().to_string();
-        log_terminal_command(tx, desc, &cmd_str, format!("Failed: {err_msg}"));
-        anyhow::bail!("git command failed: {err_msg}")
+        let child_output = output.child_output();
+        let reason = logged.failure_reason(&child_output);
+        logged.finish(tx, format!("Failed: {reason}"), child_output);
+        anyhow::bail!("git command failed: {reason}")
     }
 }
 
@@ -3759,94 +3756,41 @@ async fn run_gh_raw_api(
     body: Option<&str>,
     desc: &str,
 ) -> Result<String> {
-    let mut cmd_args: Vec<String> = vec!["api".into()];
-    if method != "GET" {
-        cmd_args.push("-X".into());
-        cmd_args.push(method.into());
-    }
-    cmd_args.push(endpoint.into());
-    let cmd_str = format!("gh {}", cmd_args.join(" "));
-    let label = desc.to_uppercase();
-
-    let mut cmd = Command::new("gh");
-    cmd.arg("api");
-    if method != "GET" {
-        cmd.arg("-X");
-        cmd.arg(method);
-    }
     let input = body.filter(|b| !b.is_empty());
-    if input.is_some() {
-        cmd.arg("--input");
-        cmd.arg("-");
+    let mut args = vec!["api"];
+    if method != "GET" {
+        args.extend(["-X", method]);
     }
-    cmd.arg(endpoint);
+    if input.is_some() {
+        args.extend(["--input", "-"]);
+    }
+    args.push(endpoint);
+    let logged = LoggedCommand::start(desc, Invocation::new(Program::Gh, &args).with_stdin(input));
 
-    let output = super::subprocess::output(&mut cmd, input.map(str::as_bytes)).await;
+    let output =
+        super::subprocess::output(Command::new("gh").args(&args), input.map(str::as_bytes)).await;
 
-    let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
     match output {
         Ok(out) => {
             if out.status.success() {
-                let s = String::from_utf8(out.stdout)?;
-                if let Some(ref tx) = tx {
-                    let _ = tx.send(Event::TerminalCommandLogged {
-                        timestamp,
-                        command: format!("{label}: {cmd_str}"),
-                        status: "Success".to_string(),
-                    });
-                }
-                Ok(s)
+                logged.finish(tx.as_ref(), "Success".to_string(), (&out).into());
+                Ok(String::from_utf8(out.stdout)?)
             } else {
-                let mut err_msg = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                // `gh api` prints only the HTTP status on stderr; GitHub's reason
-                // (e.g. "Can not approve your own pull request") is in the body on stdout.
-                if let Some(details) = github_error_details(&out.stdout) {
-                    err_msg = format!("{err_msg}: {details}");
-                }
-                if let Some(ref tx) = tx {
-                    let _ = tx.send(Event::TerminalCommandLogged {
-                        timestamp,
-                        command: format!("{label}: {cmd_str}"),
-                        status: format!("Failed: {err_msg}"),
-                    });
-                }
-                anyhow::bail!("gh api failed: {err_msg}")
+                let child_output = ChildOutput::from(&out);
+                let reason = logged.failure_reason(&child_output);
+                logged.finish(tx.as_ref(), format!("Failed: {reason}"), child_output);
+                anyhow::bail!("gh api failed: {reason}")
             }
         }
         Err(e) => {
-            let err_msg = format!("{e}");
-            if let Some(ref tx) = tx {
-                let _ = tx.send(Event::TerminalCommandLogged {
-                    timestamp,
-                    command: format!("{label}: {cmd_str}"),
-                    status: format!("Failed: {err_msg}"),
-                });
-            }
+            logged.finish(
+                tx.as_ref(),
+                format!("Failed: {e}"),
+                ChildOutput::NOT_STARTED,
+            );
             Err(e)
         }
     }
-}
-
-fn github_error_details(body: &[u8]) -> Option<String> {
-    let value: serde_json::Value = serde_json::from_slice(body).ok()?;
-    let details: Vec<String> = value
-        .get("errors")?
-        .as_array()?
-        .iter()
-        .filter_map(|e| {
-            let text = |key| e.get(key).and_then(serde_json::Value::as_str);
-            match (
-                e.as_str().or_else(|| text("message")),
-                text("field"),
-                text("code"),
-            ) {
-                (Some(message), _, _) => Some(message.to_string()),
-                (None, Some(field), Some(code)) => Some(format!("{field} {code}")),
-                _ => None,
-            }
-        })
-        .collect();
-    (!details.is_empty()).then(|| details.join("; "))
 }
 
 /// Compute duration in seconds between two ISO 8601 timestamps.
@@ -3870,22 +3814,21 @@ async fn open_github_url(
     tx: Option<tokio::sync::mpsc::UnboundedSender<crate::event::Event>>,
     label: &str,
 ) -> anyhow::Result<()> {
+    let logged = LoggedCommand::start(label, Invocation::new(Program::Git, &["web--browse", url]));
     let output = tokio::process::Command::new("git")
         .args(["web--browse", url])
         .output()
         .await;
-    let timestamp = chrono::Local::now().format("%H:%M:%S").to_string();
-    let status = match &output {
-        Ok(out) if out.status.success() => "Success".to_string(),
-        _ => "Success".to_string(),
+    let (status, child_output) = match &output {
+        Ok(out) if out.status.success() => ("Success".to_string(), ChildOutput::from(out)),
+        Ok(out) => {
+            let child_output = ChildOutput::from(out);
+            let reason = logged.failure_reason(&child_output);
+            (format!("Failed: {reason}"), child_output)
+        }
+        Err(error) => (format!("Failed: {error}"), ChildOutput::NOT_STARTED),
     };
-    if let Some(ref tx) = tx {
-        let _ = tx.send(crate::event::Event::TerminalCommandLogged {
-            timestamp,
-            command: format!("{label}: git web--browse {url}"),
-            status,
-        });
-    }
+    logged.finish(tx.as_ref(), status, child_output);
     Ok(())
 }
 
@@ -3996,19 +3939,6 @@ pub fn parse_github_actions_runs(raw: &str) -> Result<Vec<Pipeline>> {
 #[cfg(test)]
 mod tests {
     use super::*;
-
-    #[test]
-    fn github_error_details_reads_string_and_object_errors() {
-        let body = br#"{"message":"Unprocessable Entity","errors":["Review Can not approve your own pull request",{"resource":"PullRequestReviewComment","code":"custom","message":"line must be part of the diff"},{"resource":"PullRequestReviewComment","field":"in_reply_to","code":"invalid"}],"status":"422"}"#;
-        assert_eq!(
-            github_error_details(body).as_deref(),
-            Some(
-                "Review Can not approve your own pull request; line must be part of the diff; in_reply_to invalid"
-            )
-        );
-        assert_eq!(github_error_details(br#"{"message":"Not Found"}"#), None);
-        assert_eq!(github_error_details(b"not json"), None);
-    }
 
     #[test]
     fn a_pending_async_merge_is_polled_by_its_uuid() {
