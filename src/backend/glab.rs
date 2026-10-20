@@ -29,6 +29,9 @@ use tokio::task::JoinSet;
 /// GitLab rejects a job log `byte_limit` above 500 KiB.
 const GITLAB_TRACE_RANGE_MAX_BYTES: usize = 500 * 1024;
 
+/// GitLab caps `per_page` at 100.
+const GITLAB_MAX_PER_PAGE: usize = 100;
+
 fn strip_ats(s: &str) -> String {
     if s.is_empty() {
         return s.to_string();
@@ -1329,6 +1332,7 @@ impl Backend for GlabBackend {
                                 source: None,
                                 project_path: String::new(),
                                 web_url: p.web_url,
+                                commit: None,
                             }),
                             blocking_discussions_resolved: m.blocking_discussions_resolved,
                             approval: None,
@@ -1505,6 +1509,7 @@ impl Backend for GlabBackend {
                 source: None,
                 project_path: String::new(),
                 web_url: p.web_url,
+                commit: None,
             }),
             blocking_discussions_resolved: m.blocking_discussions_resolved,
             approval: None,
@@ -1992,6 +1997,7 @@ impl Backend for GlabBackend {
                             source: p.source,
                             project_path: project.to_string(),
                             web_url: p.web_url,
+                            commit: None,
                         }
                     }));
                 }
@@ -2081,6 +2087,8 @@ impl Backend for GlabBackend {
             failure_reason: Option<String>,
             #[serde(default)]
             artifacts: Option<Vec<GiArtifact>>,
+            #[serde(default)]
+            commit: Option<crate::domain::pipelines::CommitSummary>,
         }
         #[derive(Deserialize)]
         struct GiRunner {
@@ -2095,6 +2103,10 @@ impl Backend for GlabBackend {
         let all_jobs: Vec<Job> = jobs
             .into_iter()
             .map(|j| Job {
+                failure_reason: j
+                    .failure_reason
+                    .filter(|_| j.status == "failed")
+                    .map(|reason| reason.replace('_', " ")),
                 id: j.id,
                 status: j.status,
                 stage: j.stage,
@@ -2106,7 +2118,6 @@ impl Backend for GlabBackend {
                 needs: Vec::new(),
                 web_url: j.web_url,
                 queued_seconds: j.queued_duration.map(|seconds| seconds.max(0.0) as u64),
-                failure_reason: j.failure_reason,
                 artifact_file_types: j
                     .artifacts
                     .into_iter()
@@ -2115,6 +2126,7 @@ impl Backend for GlabBackend {
                     // GitLab lists every finished job's own log as a `trace` artifact.
                     .filter(|file_type| file_type != "trace")
                     .collect(),
+                commit: j.commit,
             })
             .collect();
         Ok(crate::domain::pipelines::process_pipeline_jobs(all_jobs))
@@ -2169,6 +2181,55 @@ impl Backend for GlabBackend {
         let endpoint = format!("/projects/{encoded}/pipelines/{pipeline_id}/retry");
         self.raw_api(&endpoint, "POST", None, "Retrying Pipeline")
             .await?;
+        Ok(())
+    }
+
+    /// Retries each failed job on its own: GitLab's pipeline retry endpoint
+    /// also reruns canceled jobs. Without `include_retried` the listing holds
+    /// only the latest attempt of each job, so a retried job leaves it and
+    /// shifts the pages after it: every page is read before the first retry.
+    async fn retry_failed_jobs(&self, project: &str, pipeline_id: u64) -> Result<()> {
+        #[derive(Deserialize)]
+        struct FailedJob {
+            id: u64,
+        }
+        let encoded = Self::encode_path(project);
+        let mut failed: Vec<FailedJob> = Vec::new();
+        for page in 1.. {
+            let endpoint = format!(
+                "/projects/{encoded}/pipelines/{pipeline_id}/jobs?scope[]=failed&per_page={GITLAB_MAX_PER_PAGE}&page={page}"
+            );
+            let raw = self
+                .raw_api(&endpoint, "GET", None, "Fetching Failed Jobs")
+                .await?;
+            let batch: Vec<FailedJob> =
+                serde_json::from_str(&raw).context("parsing the failed jobs of a pipeline")?;
+            let is_last_page = batch.len() < GITLAB_MAX_PER_PAGE;
+            failed.extend(batch);
+            if is_last_page {
+                break;
+            }
+        }
+        if failed.is_empty() {
+            anyhow::bail!("pipeline #{pipeline_id} has no failed jobs to retry");
+        }
+        let mut errors = Vec::new();
+        for (i, job) in failed.iter().enumerate() {
+            if i > 0 {
+                crate::backend::rate_limit::pace_bulk_operation().await;
+            }
+            if let Err(error) = self.retry_job(project, job.id).await {
+                errors.push(format!("job #{}: {error}", job.id));
+            }
+        }
+        if !errors.is_empty() {
+            anyhow::bail!(
+                "retried {} of {} failed jobs: {}",
+                failed.len() - errors.len(),
+                failed.len(),
+                errors.join("; ")
+            );
+        }
         Ok(())
     }
 

@@ -1302,6 +1302,7 @@ pub(crate) fn render_tab_pipelines(
                 source: Some("parent_pipeline".to_string()),
                 project_path: String::new(),
                 web_url: None,
+                commit: None,
             })
             .collect();
         filtered_pipelines.extend(pending_rows.iter());
@@ -1587,7 +1588,7 @@ pub(crate) fn render_tab_pipelines(
         if let Some(selected) = app.pipelines.state.selected() {
             if let Some(p) = filtered_pipelines.get(selected) {
                 let jobs = app.pipeline_jobs.get(&p.id()).cloned().unwrap_or_default();
-                let doc = crate::entity_editor::build_pipeline_document(p, &jobs);
+                let doc = crate::entity_editor::build_pipeline_document(p, &jobs, is_github);
                 let max_detail_scroll = super::inspector::render_entity_inspector(
                     f,
                     &doc,

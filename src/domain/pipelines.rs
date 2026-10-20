@@ -29,6 +29,19 @@ pub struct Pipeline {
     pub project_path: String,
     #[serde(default)]
     pub web_url: Option<String>,
+    /// Filled when the API lists the commit with the pipeline (GitHub).
+    /// GitLab reports it only with each job, see `triggering_commit`.
+    #[serde(default)]
+    pub commit: Option<CommitSummary>,
+}
+
+/// The commit a pipeline ran for, as far as the API reports it.
+#[derive(Debug, Deserialize, Serialize, Clone, Default, PartialEq, Eq)]
+pub struct CommitSummary {
+    #[serde(default)]
+    pub title: String,
+    #[serde(default)]
+    pub author_name: String,
 }
 
 impl Pipeline {
@@ -92,10 +105,14 @@ pub struct Job {
     pub web_url: Option<String>,
     #[serde(default)]
     pub queued_seconds: Option<u64>,
+    /// Why a failed job failed, in words (`script failure`, `step "Test"
+    /// failed`). `None` when it did not fail or the API gave no reason.
     #[serde(default)]
     pub failure_reason: Option<String>,
     #[serde(default)]
     pub artifact_file_types: Vec<String>,
+    #[serde(default)]
+    pub commit: Option<CommitSummary>,
 }
 
 impl Job {
@@ -122,6 +139,9 @@ impl Job {
     }
     pub fn needs(&self) -> &[String] {
         &self.needs
+    }
+    pub fn is_failed(&self) -> bool {
+        self.status == "failed"
     }
     pub fn set_name(&mut self, name: String) {
         self.name = name;
@@ -200,6 +220,7 @@ pub fn bridges_to_level(bridges: Vec<Bridge>) -> ChildLevel {
                 // drill-down falls back to the parent's scope, as before.
                 project_path: String::new(),
                 web_url: None,
+                commit: None,
             }),
             None => level.pending.push(PendingTrigger {
                 bridge_id: bridge.id,
@@ -213,6 +234,15 @@ pub fn bridges_to_level(bridges: Vec<Bridge>) -> ChildLevel {
 
 /// What GitLab calls the source of a pipeline reached through a bridge.
 const CHILD_SOURCE: &str = "parent_pipeline";
+
+/// The commit `pipeline` ran for: GitHub lists it with the run, GitLab only
+/// with each of the pipeline's jobs.
+pub fn triggering_commit<'a>(pipeline: &'a Pipeline, jobs: &'a [Job]) -> Option<&'a CommitSummary> {
+    pipeline
+        .commit
+        .as_ref()
+        .or_else(|| jobs.iter().find_map(|job| job.commit.as_ref()))
+}
 
 pub fn process_pipeline_jobs(all_jobs: Vec<Job>) -> Vec<Job> {
     let all_jobs: Vec<Job> = all_jobs

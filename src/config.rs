@@ -1134,14 +1134,29 @@ pub struct KeybindingPipelines {
     pub enter_jobs: String,
     #[serde(default)]
     pub retry: String,
+    /// Rerun only the failed jobs of the selected pipeline(s).
+    #[serde(default = "def_retry_failed")]
+    pub retry_failed: String,
     #[serde(default)]
     pub cancel: String,
     #[serde(default)]
     pub open_workflow: String,
     #[serde(default = "def_open_in_browser")]
     pub open_in_browser: String,
-    #[serde(default = "def_copy_sha")]
+    #[serde(default = "def_copy_pipeline_sha")]
     pub copy_sha: String,
+    #[serde(default = "def_copy_url")]
+    pub copy_url: String,
+    /// Copy the pipeline id as `#123`.
+    #[serde(default = "def_copy_id")]
+    pub copy_id: String,
+    /// Step the Status filter through All, Running, Failed and Success.
+    #[serde(default = "def_cycle_status_filter")]
+    pub cycle_status_filter: String,
+    /// Show or hide the inspector pane, which Enter opens on the other tabs.
+    /// Here Enter descends into the pipeline instead.
+    #[serde(default = "def_toggle_preview")]
+    pub toggle_preview: String,
     #[serde(default = "def_select_pipeline")]
     pub select_pipeline: String,
     #[serde(default = "def_selection_toggle")]
@@ -1352,6 +1367,7 @@ pub struct CustomKeybindingConfig {
     pub mrs: Vec<CustomKeybinding>,
     /// Run from the MR/PR diff view, with the file and line under the cursor.
     pub diff: Vec<CustomKeybinding>,
+    pub pipelines: Vec<CustomKeybinding>,
     /// Run from the Jobs tab, with the highlighted job or every selected one.
     pub jobs: Vec<CustomKeybinding>,
     /// Panes that take no custom keybindings, kept only to report them.
@@ -1467,7 +1483,12 @@ keybind_defaults! {
     def_jump_to_id = "g",
     def_submit_edit = "Ctrl+x",
     def_copy_branch = "y",
-    def_copy_sha = "y",
+    def_retry_failed = "R",
+    def_copy_pipeline_sha = "C",
+    def_copy_url = "y",
+    def_copy_id = "Y",
+    def_cycle_status_filter = "s",
+    def_toggle_preview = "i",
 }
 
 impl Default for KeybindingGlobal {
@@ -1549,10 +1570,15 @@ impl Default for KeybindingPipelines {
             run_new: def_run_new(),
             enter_jobs: def_enter_jobs(),
             retry: def_retry(),
+            retry_failed: def_retry_failed(),
             cancel: def_cancel(),
             open_workflow: def_open_workflow(),
             open_in_browser: def_open_in_browser(),
-            copy_sha: def_copy_sha(),
+            copy_sha: def_copy_pipeline_sha(),
+            copy_url: def_copy_url(),
+            copy_id: def_copy_id(),
+            cycle_status_filter: def_cycle_status_filter(),
+            toggle_preview: def_toggle_preview(),
             select_pipeline: def_select_pipeline(),
             selection_toggle: def_selection_toggle(),
             select_all: def_select_all(),
@@ -1961,6 +1987,12 @@ trigger_pipeline = "p"
 enter_jobs = "Alt+j"
 select_pipeline = "Space"
 retry = "r"
+retry_failed = "R"
+cycle_status_filter = "s"
+toggle_preview = "i"
+copy_url = "y"
+copy_id = "Y"
+copy_sha = "C"
 cancel = "d"
 open_workflow = "W"
 selection_toggle = "v"
@@ -2053,6 +2085,7 @@ cycle_status_filter = "s"
 # `prs` is accepted for `mrs`). Template arguments per table:
 #   mrs:       RepoName RepoPath PrNumber HeadRefName BaseRefName Author
 #   issues:    RepoName RepoPath IssueNumber IssueTitle Author
+#   pipelines: RepoName RepoPath PipelineId Ref Sha
 #   jobs:      RepoName RepoPath JobId JobName Stage Status
 #   universal: RepoName RepoPath
 #   diff:      mrs arguments + FilePath LineNumber (the line under the diff cursor)
@@ -2565,9 +2598,29 @@ page_size = 250
     }
 
     #[test]
-    fn copy_sha_defaults_to_y_on_pipelines_and_alt_y_on_jobs() {
-        assert_eq!(Config::default().keybindings.pipelines.copy_sha, "y");
+    fn copy_sha_defaults_to_c_on_pipelines_and_alt_y_on_jobs() {
+        assert_eq!(Config::default().keybindings.pipelines.copy_sha, "C");
         assert_eq!(Config::default().keybindings.jobs.copy_sha, "Alt+y");
+    }
+
+    #[test]
+    fn pipeline_default_bindings_never_share_a_key() {
+        let bindings = toml::Value::try_from(KeybindingPipelines::default()).expect("serialize");
+        let mut keys: Vec<&str> = bindings
+            .as_table()
+            .expect("a table of bindings")
+            .values()
+            .filter_map(toml::Value::as_str)
+            .filter(|key| !key.is_empty())
+            .collect();
+        let total = keys.len();
+        keys.sort_unstable();
+        keys.dedup();
+        assert_eq!(
+            keys.len(),
+            total,
+            "a default key is bound twice: {bindings}"
+        );
     }
 
     #[test]
