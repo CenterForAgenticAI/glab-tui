@@ -970,6 +970,9 @@ just check      # runs fmt check, clippy, unit tests, and single-threaded e2e te
 ```
 
 Available recipes:
+- `just run [args]` — run a debug build, passing `args` to glab-tui
+- `just build` — build the release binary (`target/release/glab-tui`)
+- `just install` — build, then copy the binary to the first directory in `PATH`
 - `just fmt` / `just fmt-check` — format code or verify formatting
 - `just lint` — run Clippy with `-Dwarnings`
 - `just test` — run unit tests (`cargo test --lib --bin glab-tui`)
