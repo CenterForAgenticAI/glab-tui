@@ -3934,6 +3934,16 @@ pub struct App {
     pub selected_jobs: std::collections::HashSet<u64>,
     pub selected_issues: std::collections::HashSet<(String, u64)>,
     pub selected_mrs: std::collections::HashSet<(String, u64)>,
+    /// Notification ids picked for a batch read/done on the Todos tab.
+    pub selected_todos: std::collections::HashSet<String>,
+    /// GitHub notifications whose detail fetch is in flight.
+    pub fetching_todo_details: std::collections::HashSet<String>,
+    /// Why a notification's detail fetch failed, by id. Kept so the
+    /// inspector says so instead of fetching again on every tick.
+    pub failed_todo_details: std::collections::HashMap<String, String>,
+    /// Notification in the inspector whose detail fetch waits for the cursor
+    /// to rest, and since when.
+    pub todo_detail_candidate: Option<(String, std::time::Instant)>,
     /// When true, moving the cursor through Issues/MRs marks each visited
     /// item into the selection set (yazi-style "select mode"). `Space` still
     /// toggles the current item individually regardless of this flag.
@@ -4111,6 +4121,10 @@ impl Default for App {
             selected_jobs: std::collections::HashSet::new(),
             selected_issues: std::collections::HashSet::new(),
             selected_mrs: std::collections::HashSet::new(),
+            selected_todos: std::collections::HashSet::new(),
+            fetching_todo_details: std::collections::HashSet::new(),
+            failed_todo_details: std::collections::HashMap::new(),
+            todo_detail_candidate: None,
             select_mode: false,
             select_anchor: None,
             details_zoomed: false,
@@ -4353,6 +4367,10 @@ impl App {
         self.column_filter_context = None;
         self.selected_issues.clear();
         self.selected_mrs.clear();
+        self.selected_todos.clear();
+        self.fetching_todo_details.clear();
+        self.failed_todo_details.clear();
+        self.todo_detail_candidate = None;
         self.select_mode = false;
         self.select_anchor = None;
         self.loaded_tabs.clear();
@@ -4751,6 +4769,16 @@ impl App {
                 }
                 self.selected_jobs.len().saturating_sub(before)
             }
+            Tab::Todos => {
+                let keys: Vec<String> = self
+                    .filtered_todos()
+                    .into_iter()
+                    .map(|t| t.id.clone())
+                    .collect();
+                let before = self.selected_todos.len();
+                self.selected_todos.extend(keys);
+                self.selected_todos.len().saturating_sub(before)
+            }
             _ => 0,
         }
     }
@@ -4762,11 +4790,13 @@ impl App {
         let cleared = !self.selected_issues.is_empty()
             || !self.selected_mrs.is_empty()
             || !self.selected_pipelines.is_empty()
-            || !self.selected_jobs.is_empty();
+            || !self.selected_jobs.is_empty()
+            || !self.selected_todos.is_empty();
         self.selected_issues.clear();
         self.selected_mrs.clear();
         self.selected_pipelines.clear();
         self.selected_jobs.clear();
+        self.selected_todos.clear();
         self.select_mode = false;
         self.select_anchor = None;
         cleared
@@ -4782,6 +4812,7 @@ impl App {
                 Tab::MergeRequests => self.mrs.state.selected(),
                 Tab::Pipelines => self.pipelines.state.selected(),
                 Tab::Jobs => self.jobs.state.selected(),
+                Tab::Todos => self.todos.state.selected(),
                 _ => None,
             };
             self.select_anchor = curr;
@@ -4855,6 +4886,19 @@ impl App {
                         if start <= end {
                             self.selected_jobs =
                                 filtered[start..=end].iter().map(|j| j.id()).collect();
+                        }
+                    }
+                }
+            }
+            Tab::Todos => {
+                if let Some(curr) = self.todos.state.selected() {
+                    let filtered = self.filtered_todos();
+                    if !filtered.is_empty() {
+                        let start = anchor.min(curr);
+                        let end = anchor.max(curr).min(filtered.len().saturating_sub(1));
+                        if start <= end {
+                            self.selected_todos =
+                                filtered[start..=end].iter().map(|t| t.id.clone()).collect();
                         }
                     }
                 }
@@ -6146,6 +6190,7 @@ impl App {
         self.selected_jobs.clear();
         self.selected_issues.clear();
         self.selected_mrs.clear();
+        self.selected_todos.clear();
         self.select_mode = false;
         self.select_anchor = None;
         self.details_zoomed = false;
@@ -6169,6 +6214,7 @@ impl App {
         self.selected_jobs.clear();
         self.selected_issues.clear();
         self.selected_mrs.clear();
+        self.selected_todos.clear();
         self.select_mode = false;
         self.select_anchor = None;
         self.details_zoomed = false;
@@ -7023,6 +7069,7 @@ impl App {
         items: &'a [crate::domain::notifications::Notification],
         query: &str,
         enabled_cols: &std::collections::HashSet<String>,
+        kind: BackendKind,
     ) -> Vec<&'a crate::domain::notifications::Notification> {
         if query.trim().is_empty() {
             return items.iter().collect();
@@ -7045,6 +7092,7 @@ impl App {
                     try_match(&item.project_path);
                 }
                 if enabled_cols.contains("Type") {
+                    try_match(item.type_label(kind));
                     try_match(&item.target_type);
                 }
                 if enabled_cols.contains("ID") {
@@ -7074,15 +7122,16 @@ impl App {
         enabled_columns: &std::collections::HashMap<Tab, std::collections::HashSet<String>>,
         ascending: bool,
         group_by_column: &Option<String>,
+        kind: BackendKind,
     ) -> Vec<&'a crate::domain::notifications::Notification> {
         let default_set = std::collections::HashSet::new();
         let enabled_cols = enabled_columns.get(&Tab::Todos).unwrap_or(&default_set);
-        let mut list = Self::filter_todos_list(items, query, enabled_cols);
+        let mut list = Self::filter_todos_list(items, query, enabled_cols, kind);
         if let Some(col) = group_by_column {
             list.sort_by(|a, b| {
                 let val_a = match col.as_str() {
                     "State" => a.state.clone(),
-                    "Type" => a.target_type.clone(),
+                    "Type" => a.type_label(kind).to_string(),
                     "Project" => a.project_path.clone(),
                     "ID" => a.target_iid.to_string(),
                     "Title" => a.title.clone(),
@@ -7091,7 +7140,7 @@ impl App {
                 };
                 let val_b = match col.as_str() {
                     "State" => b.state.clone(),
-                    "Type" => b.target_type.clone(),
+                    "Type" => b.type_label(kind).to_string(),
                     "Project" => b.project_path.clone(),
                     "ID" => b.target_iid.to_string(),
                     "Title" => b.title.clone(),
@@ -7108,9 +7157,12 @@ impl App {
         list
     }
 
+    /// The Type column's values are the label it shows, then the raw type that
+    /// filters saved before the label still name.
     pub fn todo_filter_values(
         item: &crate::domain::notifications::Notification,
         col: &str,
+        kind: BackendKind,
     ) -> Vec<String> {
         match col {
             "State" => vec![if item.is_unread() {
@@ -7119,7 +7171,14 @@ impl App {
                 "READ".to_string()
             }],
             "Project" => vec![item.project_path.clone()],
-            "Type" => vec![item.target_type.clone()],
+            "Type" => {
+                let label = item.type_label(kind);
+                if label == item.target_type {
+                    vec![label.to_string()]
+                } else {
+                    vec![label.to_string(), item.target_type.clone()]
+                }
+            }
             "ID" => vec![item.id.to_string()],
             "Title" => vec![item.title.clone()],
             "Updated" => vec![crate::utils::format::time_ago(&item.updated_at)],
@@ -7128,6 +7187,7 @@ impl App {
     }
 
     pub fn filtered_todos(&self) -> Vec<&crate::domain::notifications::Notification> {
+        let kind = self.kind();
         let mut list = Self::filtered_todos_list(
             &self.todos.items,
             &self.search_query,
@@ -7137,13 +7197,11 @@ impl App {
                 .copied()
                 .unwrap_or(true),
             self.group_by_column.get(&Tab::Todos).unwrap_or(&None),
+            kind,
         );
-        Self::apply_column_filters(
-            &mut list,
-            &self.column_filters,
-            Tab::Todos,
-            Self::todo_filter_values,
-        );
+        Self::apply_column_filters(&mut list, &self.column_filters, Tab::Todos, |item, col| {
+            Self::todo_filter_values(item, col, kind)
+        });
         list
     }
 
@@ -7167,6 +7225,126 @@ impl App {
         }
     }
 
+    /// Replaces the listed todos with a fresh fetch. A notification that has
+    /// not changed since its detail was fetched keeps it, a failed detail
+    /// fetch is tried again, and selections of notifications that left the
+    /// list are dropped.
+    pub fn set_todos(
+        &mut self,
+        mut notifications: Vec<crate::domain::notifications::Notification>,
+    ) {
+        for todo in notifications.iter_mut().filter(|t| t.body.is_none()) {
+            if let Some(known) = self
+                .todos
+                .items
+                .iter()
+                .find(|k| k.id == todo.id && k.updated_at == todo.updated_at)
+            {
+                todo.body = known.body.clone();
+                todo.author = known.author.clone();
+            }
+        }
+        self.failed_todo_details.clear();
+        self.todos.items = notifications;
+        self.prune_todo_selection();
+    }
+
+    /// Toggles the highlighted todo in or out of the batch selection.
+    pub fn toggle_todo_selection(&mut self) {
+        let Some(id) = self.selected_todo().map(|todo| todo.id.clone()) else {
+            return;
+        };
+        if !self.selected_todos.remove(&id) {
+            self.selected_todos.insert(id);
+        }
+    }
+
+    /// The todos a read or done key acts on: every selected one, in list
+    /// order and whether the search shows it or not, else the highlighted one.
+    pub fn todo_ids_to_act_on(&self) -> Vec<String> {
+        if self.selected_todos.is_empty() {
+            return self
+                .selected_todo()
+                .map(|t| t.id.clone())
+                .into_iter()
+                .collect();
+        }
+        self.todos
+            .items
+            .iter()
+            .filter(|t| self.selected_todos.contains(&t.id))
+            .map(|t| t.id.clone())
+            .collect()
+    }
+
+    /// `todo_ids_to_act_on` without the todos already read, which a read
+    /// mark would leave unchanged.
+    pub fn unread_todo_ids_to_act_on(&self) -> Vec<String> {
+        let mut ids = self.todo_ids_to_act_on();
+        ids.retain(|id| {
+            self.todos
+                .items
+                .iter()
+                .any(|t| &t.id == id && t.is_unread())
+        });
+        ids
+    }
+
+    pub fn copy_selected_todo_url(&mut self) -> anyhow::Result<()> {
+        let url = self
+            .selected_todo()
+            .map(|todo| todo.web_url.clone())
+            .filter(|url| !url.is_empty())
+            .ok_or_else(|| anyhow::anyhow!("URL unavailable; refresh the tab"))?;
+        self.clipboard.set_text(url)?;
+        Ok(())
+    }
+
+    pub fn copy_selected_todo_reference(&mut self) -> anyhow::Result<()> {
+        let kind = self.kind();
+        let todo = self
+            .selected_todo()
+            .ok_or_else(|| anyhow::anyhow!("nothing selected"))?;
+        let reference = todo.reference(kind).ok_or_else(|| {
+            anyhow::anyhow!(
+                "{} {} have no reference",
+                todo.target_type,
+                kind.term("todo_plural").to_lowercase()
+            )
+        })?;
+        self.clipboard.set_text(reference)?;
+        Ok(())
+    }
+
+    /// Stores the outcome of a notification's detail fetch. A result for a
+    /// path the notification no longer points at is dropped, so the next tick
+    /// fetches the current one.
+    pub fn apply_todo_detail(
+        &mut self,
+        id: &str,
+        detail_api_path: &str,
+        result: Result<crate::domain::notifications::NotificationDetail, String>,
+    ) {
+        self.fetching_todo_details.remove(id);
+        let Some(todo) = self
+            .todos
+            .items
+            .iter_mut()
+            .find(|t| t.id == id && t.detail_api_path.as_deref() == Some(detail_api_path))
+        else {
+            return;
+        };
+        match result {
+            Ok(detail) => {
+                self.failed_todo_details.remove(id);
+                todo.apply_detail(detail);
+            }
+            Err(error) => {
+                self.failed_todo_details.insert(id.to_string(), error);
+            }
+        }
+    }
+
     /// Applies a todo mutation the server accepted to the local list. Read
     /// and done items stay listed only while the tab shows them. GitHub's
     /// done notifications leave the inbox whatever the filter.
@@ -7176,10 +7354,10 @@ impl App {
         let shows_read = self.shows_read_todos();
         let read_state = crate::domain::notifications::read_state(kind);
         match change {
-            TodoChange::MarkedRead(id) => self.settle_todo(id, shows_read.then_some(read_state)),
-            TodoChange::MarkedDone(id) => {
+            TodoChange::MarkedRead(ids) => self.settle_todos(ids, shows_read.then_some(read_state)),
+            TodoChange::MarkedDone(ids) => {
                 let stays_listed = shows_read && kind.is_gitlab();
-                self.settle_todo(id, stays_listed.then_some(read_state));
+                self.settle_todos(ids, stays_listed.then_some(read_state));
             }
             TodoChange::MarkedAllRead if shows_read => {
                 for todo in self.todos.items.iter_mut().filter(|t| t.is_unread()) {
@@ -7189,19 +7367,27 @@ impl App {
             TodoChange::MarkedAllRead => self.todos.items.clear(),
             TodoChange::Unsubscribed(_) => {}
         }
+        self.prune_todo_selection();
         self.clamp_todo_selection();
     }
 
-    /// Restates the todo `id` as `state`, or drops it from the list for `None`.
-    fn settle_todo(&mut self, id: &str, state: Option<&str>) {
+    /// Restates the todos `ids` as `state`, or drops them from the list for
+    /// `None`.
+    fn settle_todos(&mut self, ids: &[String], state: Option<&str>) {
         match state {
             Some(state) => {
-                if let Some(todo) = self.todos.items.iter_mut().find(|t| t.id == id) {
+                for todo in self.todos.items.iter_mut().filter(|t| ids.contains(&t.id)) {
                     todo.state = state.to_string();
                 }
             }
-            None => self.todos.items.retain(|t| t.id != id),
+            None => self.todos.items.retain(|t| !ids.contains(&t.id)),
         }
+    }
+
+    fn prune_todo_selection(&mut self) {
+        let items = &self.todos.items;
+        self.selected_todos
+            .retain(|id| items.iter().any(|todo| &todo.id == id));
     }
 
     fn clamp_todo_selection(&mut self) {
@@ -7685,8 +7871,9 @@ impl App {
                 }
             }
             Tab::Todos => {
+                let kind = self.kind();
                 for item in &self.todos.items {
-                    for v in Self::todo_filter_values(item, col) {
+                    if let Some(v) = Self::todo_filter_values(item, col, kind).into_iter().next() {
                         values.insert(v);
                     }
                 }
@@ -7851,13 +8038,14 @@ impl App {
                 map
             }
             Tab::Todos => {
+                let kind = self.kind();
                 let items = self.filtered_todos();
                 let mut map: std::collections::BTreeMap<String, Vec<usize>> =
                     std::collections::BTreeMap::new();
                 for (idx, n) in items.iter().enumerate() {
                     let key = match col.as_str() {
                         "State" => n.state.clone(),
-                        "Type" => n.target_type.clone(),
+                        "Type" => n.type_label(kind).to_string(),
                         "Project" => n.project_path.clone(),
                         "ID" => format!("#{}", n.target_iid),
                         "Title" => {
@@ -12158,6 +12346,7 @@ index 123456..789012 100644
             target_iid: 1,
             title: "Task 1".to_string(),
             updated_at: "".to_string(),
+            ..Default::default()
         };
         let t_done = crate::domain::notifications::Notification {
             id: "102".to_string(),
@@ -12167,6 +12356,7 @@ index 123456..789012 100644
             target_iid: 2,
             title: "Task 2".to_string(),
             updated_at: "".to_string(),
+            ..Default::default()
         };
         app.todos.items = vec![t_unread, t_done];
 
@@ -13925,7 +14115,7 @@ index 123456..789012 100644
         let mut app = app_with_todos(BackendKind::GitHub, false);
         app.todos.state.select(Some(2));
 
-        app.apply_todo_change(&TodoChange::MarkedRead("1".to_string()));
+        app.apply_todo_change(&TodoChange::MarkedRead(vec!["1".to_string()]));
 
         assert_eq!(todo_states(&app), vec![("2", "pending"), ("3", "read")]);
         assert_eq!(app.todos.state.selected(), Some(1));
@@ -13935,14 +14125,14 @@ index 123456..789012 100644
     fn marking_a_todo_read_keeps_it_as_read_while_read_todos_are_shown() {
         use crate::domain::notifications::TodoChange;
         let mut github = app_with_todos(BackendKind::GitHub, true);
-        github.apply_todo_change(&TodoChange::MarkedRead("1".to_string()));
+        github.apply_todo_change(&TodoChange::MarkedRead(vec!["1".to_string()]));
         assert_eq!(
             todo_states(&github),
             vec![("1", "read"), ("2", "pending"), ("3", "read")]
         );
 
         let mut gitlab = app_with_todos(BackendKind::GitLab, true);
-        gitlab.apply_todo_change(&TodoChange::MarkedRead("1".to_string()));
+        gitlab.apply_todo_change(&TodoChange::MarkedRead(vec!["1".to_string()]));
         assert_eq!(
             todo_states(&gitlab),
             vec![("1", "done"), ("2", "pending"), ("3", "done")]
@@ -14004,11 +14194,11 @@ index 123456..789012 100644
     fn a_done_github_notification_leaves_the_list_even_while_read_ones_are_shown() {
         use crate::domain::notifications::TodoChange;
         let mut github = app_with_todos(BackendKind::GitHub, true);
-        github.apply_todo_change(&TodoChange::MarkedDone("2".to_string()));
+        github.apply_todo_change(&TodoChange::MarkedDone(vec!["2".to_string()]));
         assert_eq!(todo_states(&github), vec![("1", "pending"), ("3", "read")]);
 
         let mut gitlab = app_with_todos(BackendKind::GitLab, true);
-        gitlab.apply_todo_change(&TodoChange::MarkedDone("2".to_string()));
+        gitlab.apply_todo_change(&TodoChange::MarkedDone(vec!["2".to_string()]));
         assert_eq!(
             todo_states(&gitlab),
             vec![("1", "pending"), ("2", "done"), ("3", "done")]
@@ -14096,6 +14286,181 @@ index 123456..789012 100644
             vec![("1", "pending"), ("2", "pending"), ("3", "done")]
         );
         assert_eq!(app.todos.state.selected(), Some(1));
+    }
+
+    #[test]
+    fn a_batch_acts_on_every_selected_todo_even_those_the_search_hides() {
+        let mut app = app_with_todos(BackendKind::GitLab, true);
+        app.enabled_columns
+            .insert(Tab::Todos, ["Title".to_string()].into_iter().collect());
+        app.search_query = "Two".to_string();
+        app.todos.state.select(Some(0));
+        assert_eq!(app.todo_ids_to_act_on(), vec!["2".to_string()]);
+
+        app.selected_todos = ["3".to_string(), "1".to_string()].into_iter().collect();
+        assert_eq!(
+            app.todo_ids_to_act_on(),
+            vec!["1".to_string(), "3".to_string()]
+        );
+    }
+
+    #[test]
+    fn a_read_batch_skips_the_selected_todos_already_read() {
+        let mut app = app_with_todos(BackendKind::GitHub, true);
+        app.selected_todos = ["3".to_string(), "1".to_string()].into_iter().collect();
+        assert_eq!(app.unread_todo_ids_to_act_on(), vec!["1".to_string()]);
+
+        app.selected_todos = ["3".to_string()].into_iter().collect();
+        assert!(app.unread_todo_ids_to_act_on().is_empty());
+    }
+
+    #[test]
+    fn todo_type_search_filter_and_picker_use_the_label_the_cell_shows() {
+        let mut app = app_with_todos(BackendKind::GitHub, true);
+        app.enabled_columns
+            .insert(Tab::Todos, ["Type".to_string()].into_iter().collect());
+        let listed = |app: &App| -> Vec<String> {
+            app.filtered_todos().iter().map(|t| t.id.clone()).collect()
+        };
+
+        app.search_query = "pr".to_string();
+        assert_eq!(listed(&app), vec!["2".to_string()]);
+        app.search_query.clear();
+
+        app.set_column_filter(Tab::Todos, "Type", ["PR".to_string()].into_iter().collect());
+        assert_eq!(listed(&app), vec!["2".to_string()]);
+        app.set_column_filter(
+            Tab::Todos,
+            "Type",
+            ["MergeRequest".to_string()].into_iter().collect(),
+        );
+        assert_eq!(listed(&app), vec!["2".to_string()]);
+        app.remove_column_filter(Tab::Todos, "Type");
+
+        assert_eq!(
+            app.collect_unique_column_values(Tab::Todos, "Type"),
+            vec!["Issue".to_string(), "PR".to_string()]
+        );
+    }
+
+    #[test]
+    fn copying_a_reference_needs_a_target_with_a_view() {
+        let (mut app, copied) = app_with_recording_clipboard();
+        app.active_tab = Tab::Todos;
+        app.todos.items = serde_json::from_value(serde_json::json!([
+            {"id": "1", "project_path": "acme/api", "title": "CI", "target_type": "CheckSuite",
+             "target_iid": 0, "state": "unread", "updated_at": ""},
+            {"id": "2", "project_path": "acme/api", "title": "Fix parser", "target_type": "Issue",
+             "target_iid": 7, "state": "unread", "updated_at": ""},
+        ]))
+        .unwrap();
+        app.todos.state.select(Some(0));
+        assert!(app.copy_selected_todo_reference().is_err());
+        assert_eq!(*copied.borrow(), None);
+
+        app.todos.state.select(Some(1));
+        app.copy_selected_todo_reference().unwrap();
+        assert_eq!(copied.borrow().as_deref(), Some("#7"));
+    }
+
+    #[test]
+    fn space_toggles_the_highlighted_todo_in_and_out_of_the_selection() {
+        let mut app = app_with_todos(BackendKind::GitLab, false);
+        app.toggle_todo_selection();
+        assert_eq!(app.selected_todos, ["2".to_string()].into_iter().collect());
+        app.toggle_todo_selection();
+        assert!(app.selected_todos.is_empty());
+    }
+
+    #[test]
+    fn visual_select_covers_the_todos_between_the_anchor_and_the_cursor() {
+        let mut app = app_with_todos(BackendKind::GitLab, true);
+        app.todos.state.select(Some(0));
+        app.toggle_select_mode();
+        app.todos.state.select(Some(2));
+        app.update_visual_selection();
+        assert_eq!(
+            app.selected_todos,
+            ["1", "2", "3"].map(String::from).into_iter().collect()
+        );
+
+        app.todos.state.select(Some(1));
+        app.update_visual_selection();
+        assert_eq!(
+            app.selected_todos,
+            ["1", "2"].map(String::from).into_iter().collect()
+        );
+    }
+
+    #[test]
+    fn marking_a_batch_done_drops_every_marked_todo_and_its_selection() {
+        use crate::domain::notifications::TodoChange;
+        let mut app = app_with_todos(BackendKind::GitHub, false);
+        app.selected_todos = ["1", "2"].map(String::from).into_iter().collect();
+
+        app.apply_todo_change(&TodoChange::MarkedDone(vec![
+            "1".to_string(),
+            "2".to_string(),
+        ]));
+
+        assert_eq!(todo_states(&app), vec![("3", "read")]);
+        assert!(app.selected_todos.is_empty());
+        assert_eq!(app.todos.state.selected(), Some(0));
+    }
+
+    #[test]
+    fn a_refetch_keeps_a_fetched_body_until_the_notification_changes() {
+        use crate::domain::notifications::NotificationDetail;
+        let mut app = app_with_todos(BackendKind::GitHub, true);
+        app.todos.items[0].detail_api_path = Some("repos/acme/api/issues/1".to_string());
+        let listed = app.todos.items.clone();
+        app.fetching_todo_details.insert("1".to_string());
+
+        app.apply_todo_detail(
+            "1",
+            "repos/acme/api/issues/1",
+            Ok(NotificationDetail {
+                author: "alice".to_string(),
+                body: "Please look".to_string(),
+            }),
+        );
+        assert!(app.fetching_todo_details.is_empty());
+
+        app.set_todos(listed.clone());
+        assert_eq!(app.todos.items[0].body.as_deref(), Some("Please look"));
+        assert_eq!(app.todos.items[0].author, "alice");
+
+        let mut updated = listed;
+        updated[0].updated_at = "2026-07-07T00:00:00Z".to_string();
+        app.set_todos(updated);
+        assert_eq!(app.todos.items[0].body, None);
+    }
+
+    #[test]
+    fn a_detail_fetched_for_a_path_the_notification_left_is_dropped() {
+        use crate::domain::notifications::NotificationDetail;
+        let mut app = app_with_todos(BackendKind::GitHub, true);
+        app.todos.items[0].detail_api_path = Some("repos/acme/api/issues/comments/2".to_string());
+
+        app.fetching_todo_details.insert("1".to_string());
+        app.apply_todo_detail(
+            "1",
+            "repos/acme/api/issues/comments/1",
+            Ok(NotificationDetail {
+                author: "alice".to_string(),
+                body: "Older comment".to_string(),
+            }),
+        );
+        app.apply_todo_detail(
+            "1",
+            "repos/acme/api/issues/comments/1",
+            Err("HTTP 502".to_string()),
+        );
+
+        assert!(app.fetching_todo_details.is_empty());
+        assert_eq!(app.todos.items[0].body, None);
+        assert_eq!(app.todos.items[0].author, "");
+        assert!(!app.failed_todo_details.contains_key("1"));
     }
 
     #[test]
