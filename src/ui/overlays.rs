@@ -1830,6 +1830,25 @@ pub(crate) fn render_help(f: &mut Frame, app: &mut App, size: Rect) {
             key: d(app.config.keybindings.runners.open_in_browser.clone()),
             action: "Open runner in browser",
         },
+        Shortcut {
+            category: "Runners",
+            key: d(app.config.keybindings.runners.cycle_status.clone()),
+            action: if app.kind().supports_runner_management() {
+                "Cycle status filter (Online, Paused, Offline, All)"
+            } else {
+                "Cycle status filter (Online, Offline, All)"
+            },
+        },
+        Shortcut {
+            category: "Runners",
+            key: d(app.config.keybindings.runners.copy_url.clone()),
+            action: "Copy runner URL",
+        },
+        Shortcut {
+            category: "Runners",
+            key: d(app.config.keybindings.runners.copy_id.clone()),
+            action: "Copy runner ID",
+        },
         // ── Releases ──
         Shortcut {
             category: "Releases",
