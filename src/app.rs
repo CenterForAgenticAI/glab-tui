@@ -4018,6 +4018,7 @@ pub struct App {
     pub milestones: StatefulTable<crate::domain::milestones::Milestone>,
     pub selected_milestone_issues: Option<Vec<crate::domain::issues::Issue>>,
     pub selected_milestone_iid: Option<u64>,
+    pub milestone_prefetch: Option<tokio::task::AbortHandle>,
     pub milestone_issues_cache: std::collections::HashMap<u64, Vec<crate::domain::issues::Issue>>,
     /// `(closed, total)` issue counts per milestone iid, derived from
     /// `issues.items.iter().filter_map(|i| i.milestone.as_ref())`.
@@ -4183,6 +4184,7 @@ impl Default for App {
             milestones: StatefulTable::with_items(vec![]),
             selected_milestone_issues: None,
             selected_milestone_iid: None,
+            milestone_prefetch: None,
             milestone_issues_cache: std::collections::HashMap::new(),
             milestone_progress_cache: std::collections::HashMap::new(),
             terminal_scroll: 0,
@@ -4399,6 +4401,9 @@ impl App {
         self.active_pipeline_project = None;
         self.selected_milestone_issues = None;
         self.selected_milestone_iid = None;
+        if let Some(handle) = self.milestone_prefetch.take() {
+            handle.abort();
+        }
         self.issues.state.select(Some(0));
         self.mrs.state.select(Some(0));
         self.pipelines.state.select(Some(0));
@@ -7512,18 +7517,23 @@ impl App {
         }
     }
 
-    /// Recompute `milestone_progress_cache` from `issues.items`. Walks the
-    /// issue list once and groups by `issue.milestone.iid`, counting closed
-    /// vs total. Issues without a milestone (or with iid == 0) are skipped.
-    /// Cheap enough to call on every IssuesFetched and on cache load.
+    /// Recompute `milestone_progress_cache`, preferring each milestone's own issue list over `issues.items`.
     pub fn rebuild_milestone_progress_cache(&mut self) {
         let mut map: std::collections::HashMap<u64, (usize, usize)> =
             std::collections::HashMap::new();
+        for (&iid, issues) in &self.milestone_issues_cache {
+            if iid == 0 {
+                continue;
+            }
+            let total = issues.len();
+            let closed = issues.iter().filter(|i| i.state == "closed").count();
+            map.insert(iid, (closed, total));
+        }
         for issue in &self.issues.items {
             let Some(m) = issue.milestone.as_ref() else {
                 continue;
             };
-            if m.iid == 0 {
+            if m.iid == 0 || self.milestone_issues_cache.contains_key(&m.iid) {
                 continue;
             }
             let entry = map.entry(m.iid).or_insert((0, 0));
@@ -7533,6 +7543,19 @@ impl App {
             }
         }
         self.milestone_progress_cache = map;
+    }
+
+    /// Returns the issues for `iid`: prefers the per-milestone cache, then falls back
+    /// to the single-buffer preview if it matches `iid`.
+    pub fn milestone_issues(&self, iid: u64) -> Option<&[crate::domain::issues::Issue]> {
+        self.milestone_issues_cache
+            .get(&iid)
+            .map(Vec::as_slice)
+            .or_else(|| {
+                (self.selected_milestone_iid == Some(iid))
+                    .then_some(self.selected_milestone_issues.as_deref())
+                    .flatten()
+            })
     }
 
     pub fn filtered_milestones(&self) -> Vec<&crate::domain::milestones::Milestone> {
@@ -9016,6 +9039,24 @@ mod tests {
     }
 
     #[test]
+    fn rebuild_milestone_progress_cache_prefers_milestone_issues_cache() {
+        let mut app = App::default();
+        app.issues.items = vec![
+            issue_with_milestone(101, "opened", 7),
+            issue_with_milestone(110, "opened", 8),
+        ];
+        let cached_issues = vec![
+            issue_with_milestone(101, "opened", 7),
+            issue_with_milestone(102, "closed", 7),
+            issue_with_milestone(103, "closed", 7),
+        ];
+        app.milestone_issues_cache.insert(7, cached_issues);
+        app.rebuild_milestone_progress_cache();
+        assert_eq!(app.milestone_progress_cache.get(&7), Some(&(2, 3)));
+        assert_eq!(app.milestone_progress_cache.get(&8), Some(&(0, 1)));
+    }
+
+    #[test]
     fn rebuild_milestone_progress_cache_ignores_unset_milestones() {
         let mut app = App::default();
         app.issues.items = vec![
@@ -9025,6 +9066,41 @@ mod tests {
         app.rebuild_milestone_progress_cache();
         assert_eq!(app.milestone_progress_cache.len(), 1);
         assert_eq!(app.milestone_progress_cache.get(&7), Some(&(1, 1)));
+    }
+
+    #[test]
+    fn milestone_issues_prefers_cache_then_selected_issues() {
+        let mut app = App::default();
+        let cached = vec![issue_with_milestone(1, "opened", 5)];
+        app.milestone_issues_cache.insert(5, cached);
+
+        let selected = vec![issue_with_milestone(2, "opened", 5)];
+        app.selected_milestone_iid = Some(5);
+        app.selected_milestone_issues = Some(selected);
+
+        let issues = app.milestone_issues(5).expect("issues found");
+        assert_eq!(issues[0].iid, 1);
+
+        app.selected_milestone_iid = Some(6);
+        app.selected_milestone_issues = Some(vec![issue_with_milestone(3, "opened", 6)]);
+        let issues6 = app.milestone_issues(6).expect("issues found");
+        assert_eq!(issues6[0].iid, 3);
+
+        assert!(app.milestone_issues(7).is_none());
+    }
+
+    #[tokio::test]
+    async fn reset_on_scope_change_aborts_running_milestone_prefetch() {
+        let mut app = App::default();
+        let handle = tokio::spawn(async {
+            tokio::time::sleep(std::time::Duration::from_secs(60)).await;
+        });
+        app.milestone_prefetch = Some(handle.abort_handle());
+
+        app.reset_on_scope_change();
+
+        assert!(app.milestone_prefetch.is_none());
+        let _ = handle.await;
     }
 
     fn issue_with_milestone(iid: u64, state: &str, milestone_iid: u64) -> Issue {
