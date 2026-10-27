@@ -2081,6 +2081,7 @@ async fn main() -> Result<()> {
                                 web_url: String::new(),
                                 can_push: false,
                                 commit_sha: String::new(),
+                                ..Default::default()
                             })
                             .collect();
                         cache_updated = true;
@@ -3248,6 +3249,7 @@ async fn main() -> Result<()> {
                                                 cursor_pos: 0,
                                                 editing: false,
                                                 desc_scroll: 0,
+                                                source_on_forge: false,
                                             });
                                         }
                                         continue;
@@ -4710,6 +4712,7 @@ async fn main() -> Result<()> {
                                         } else {
                                             None
                                         };
+                                        let source_on_forge = menu.source_on_forge;
 
                                         app.edit_menu = None;
                                         let Some(client) = app.gitlab_client.clone() else {
@@ -4719,7 +4722,7 @@ async fn main() -> Result<()> {
                                         let tx = events.sender();
                                         let tab = app.active_tab;
                                         tokio::spawn(async move {
-                                            if !source.is_empty() {
+                                            if !source.is_empty() && !source_on_forge {
                                                 let branch = source.clone();
                                                 let push_result =
                                                     tokio::task::spawn_blocking(move || {
@@ -4760,6 +4763,7 @@ async fn main() -> Result<()> {
                                                         reviewers: &reviewers,
                                                         milestone: &milestone,
                                                         issue_iid,
+                                                        source_on_forge,
                                                     },
                                                 )
                                                 .await
